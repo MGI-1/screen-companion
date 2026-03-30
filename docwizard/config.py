@@ -39,20 +39,39 @@ SUPPORTED_EDIT_FORMATS = {".txt", ".docx", ".csv", ".xlsx", ".md", ".html",
 POLL_INTERVAL_SECONDS = 2
 
 # ── Content limits ─────────────────────────────────────────────────
-MAX_CONTENT_CHARS = 100_000
-MAX_FILE_SIZE_MB = 10
+MAX_CONTENT_CHARS = 200_000
+MAX_FILE_SIZE_MB = 1024
 
 # ── Window dimensions ─────────────────────────────────────────────
 WINDOW_WIDTH = 370
 WINDOW_HEIGHT = 520
 TOGGLE_SIZE = 50
 
+# ── Validator prompts ──────────────────────────────────────────────
+VALIDATOR_SYSTEM_PROMPT = (
+    "You are a response completeness checker. "
+    "Given a user question and an AI response, determine if the response is "
+    "complete and not cut off mid-sentence, mid-list, or mid-thought. "
+    "Reply ONLY with valid JSON: "
+    '{"complete": true, "reason": "brief explanation"}'
+)
+
+VALIDATOR_USER_TEMPLATE = (
+    "User question: {question}\n\n"
+    "AI response to validate:\n{response}\n\n"
+    "Is this response complete? Reply with JSON only."
+)
+
 # ── LLM system prompt ─────────────────────────────────────────────
 SYSTEM_PROMPT = """You are Screen Companion, an intelligent document assistant. \
 You help users understand, analyze, and edit their documents.
 
 When the user asks you to edit the document, respond with your explanation \
-AND include a JSON code block with the edits:
+AND include a JSON code block with the edits. Supported edit types:
+
+- replace: {"type": "replace", "search": "old text", "replace": "new text"}
+- delete:  {"type": "delete", "search": "text to remove"}
+- insert_after: {"type": "insert_after", "search": "text to find", "replace": "content to insert after it"}
 
 ```json
 {"action": "edit", "edits": [{"type": "replace", "search": "old text", "replace": "new text"}]}

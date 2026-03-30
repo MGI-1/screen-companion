@@ -16,3 +16,4 @@ python-pptx>=1.0.0
 
 # Platform-specific
 pywin32>=305; sys_platform == "win32"
+pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"

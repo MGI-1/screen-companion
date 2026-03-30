@@ -1,5 +1,6 @@
 """Chat panel UI — message bubbles, input box, header with status."""
 
+import os
 import customtkinter as ctk
 from datetime import datetime
 from typing import Callable, Optional
@@ -27,6 +28,7 @@ class ChatWidget(ctk.CTkToplevel):
         on_theme_toggle: Callable[[], None],
         on_settings: Callable[[], None],
         on_detect: Optional[Callable[[], None]] = None,
+        on_edit: Optional[Callable[[], None]] = None,
         mode: str = "dark",
     ):
         super().__init__()
@@ -34,12 +36,18 @@ class ChatWidget(ctk.CTkToplevel):
         self._on_theme_toggle = on_theme_toggle
         self._on_settings = on_settings
         self._on_detect = on_detect
+        self._on_edit = on_edit
         self._mode = mode
 
-        # Window config
-        self.overrideredirect(True)
+        # Window config — use a normal window so keyboard input works on macOS
+        self.title("Screen Companion")
         self.attributes("-topmost", True)
         self.resizable(False, False)
+
+        # Hide from dock/taskbar on macOS
+        import sys
+        if sys.platform == "darwin":
+            self.attributes("-alpha", 0.97)
 
         self._build_ui()
         self.withdraw()  # Hidden by default
@@ -55,7 +63,42 @@ class ChatWidget(ctk.CTkToplevel):
             panel_y = 10
         self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}+{panel_x}+{panel_y}")
         self.deiconify()
+        self.lift()
+
+        # macOS: the process must become the active (frontmost) app to
+        # receive keyboard events.  The root Tk window is withdrawn so
+        # macOS will not activate the process on its own.
+        self._activate_app()
+
+        self.focus_force()
         self._input_field.focus_set()
+        # Belt-and-suspenders: retry after the event loop settles
+        self.after(150, lambda: (self.focus_force(), self._input_field.focus_set()))
+
+    @staticmethod
+    def _activate_app():
+        """Tell macOS to make this process the key application."""
+        import sys
+        if sys.platform != "darwin":
+            return
+        try:
+            from AppKit import NSApplication, NSApplicationActivateIgnoringOtherApps
+            app = NSApplication.sharedApplication()
+            app.activateIgnoringOtherApps_(True)
+        except ImportError:
+            # PyObjC not available — fall back to osascript
+            import subprocess
+            try:
+                pid = str(os.getpid())
+                subprocess.Popen(
+                    ["osascript", "-e",
+                     f'tell application "System Events" to set frontmost '
+                     f'of (first process whose unix id is {pid}) to true'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                pass
 
     def hide(self):
         """Hide the chat panel."""
@@ -161,6 +204,21 @@ class ChatWidget(ctk.CTkToplevel):
         )
         self._status_label.pack(side="left", padx=PANEL_PADDING, pady=4)
 
+        # Edit button (pencil) — shown only for editable documents
+        self._edit_btn = ctk.CTkButton(
+            self._status_bar,
+            text="\u270E",
+            width=26,
+            height=26,
+            corner_radius=13,
+            fg_color="transparent",
+            hover_color=colors["bg_glass"],
+            text_color=colors["accent"],
+            font=get_font(13),
+            command=self._handle_edit_click,
+        )
+        # Hidden by default — shown when an editable doc is detected
+
         # ── Chat area (scrollable) ─────────────────────────────
         self._chat_frame = ctk.CTkScrollableFrame(
             self._container,
@@ -217,6 +275,7 @@ class ChatWidget(ctk.CTkToplevel):
         # Bind Escape to hide
         self.bind("<Escape>", lambda e: self.hide())
 
+
     def _on_input_focus(self, event):
         colors = get_colors(self._mode)
         self._input_field.configure(border_color=colors["input_border_focus"])
@@ -229,6 +288,10 @@ class ChatWidget(ctk.CTkToplevel):
         if self._on_detect:
             self._on_detect()
 
+    def _handle_edit_click(self):
+        if self._on_edit:
+            self._on_edit()
+
     def _handle_send(self, event):
         text = self._input_field.get().strip()
         if text:
@@ -237,19 +300,25 @@ class ChatWidget(ctk.CTkToplevel):
 
     # ── Public methods ─────────────────────────────────────────
 
-    def set_document_status(self, filename: str):
+    def set_document_status(self, filename: str, editable: bool = False):
         """Update the document status bar."""
         colors = get_colors(self._mode)
         if filename:
+            suffix = " (editable)" if editable else ""
             self._status_label.configure(
-                text=f"\U0001f4c4 {filename}",
+                text=f"\U0001f4c4 {filename}{suffix}",
                 text_color=colors["text"],
             )
+            if editable:
+                self._edit_btn.pack(side="right", padx=4, pady=2)
+            else:
+                self._edit_btn.pack_forget()
         else:
             self._status_label.configure(
                 text="No document detected",
                 text_color=colors["text_muted"],
             )
+            self._edit_btn.pack_forget()
 
     def add_user_message(self, text: str):
         """Add a user message bubble (right-aligned, orange)."""
@@ -481,6 +550,10 @@ class ChatWidget(ctk.CTkToplevel):
         # Update status bar
         self._status_bar.configure(fg_color=colors["status_bg"])
         self._status_label.configure(text_color=colors["text_muted"])
+        self._edit_btn.configure(
+            text_color=colors["accent"],
+            hover_color=colors["bg_glass"],
+        )
 
         # Update chat frame
         self._chat_frame.configure(fg_color=colors["bg"])

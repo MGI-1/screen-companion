@@ -10,6 +10,7 @@ import customtkinter as ctk
 
 from docwizard.config import (
     LLM_PROVIDERS,
+    SUPPORTED_EDIT_FORMATS,
     WINDOW_WIDTH,
     WINDOW_HEIGHT,
     load_user_config,
@@ -50,6 +51,7 @@ class ScreenCompanionApp:
             on_theme_toggle=self._on_theme_toggle,
             on_settings=self._on_settings,
             on_detect=self._on_detect_document,
+            on_edit=self._on_edit_document,
             mode=self._mode,
         )
 
@@ -63,13 +65,31 @@ class ScreenCompanionApp:
             self._root.after(500, self._show_first_launch)
 
     def _load_llm_config(self):
-        """Load LLM provider config from saved settings."""
+        """Load LLM provider config from saved settings, falling back to env vars."""
+        import os
         provider = self._config.get("provider")
         api_key = self._config.get("api_key")
         model = self._config.get("model", "")
 
         if provider and api_key:
             self._chat.configure(provider, api_key, model)
+        else:
+            # Fall back to environment variables for any provider
+            for provider_key, info in LLM_PROVIDERS.items():
+                env_key = info.get("env_key", "")
+                env_val = os.environ.get(env_key, "")
+                if env_val:
+                    self._chat.configure(provider_key, env_val, model)
+                    self._config["provider"] = provider_key
+                    self._config["model"] = model or info["default_model"]
+                    break
+
+        # Load optional validator config
+        v_provider = self._config.get("validator_provider", "")
+        v_key = self._config.get("validator_api_key", "")
+        v_model = self._config.get("validator_model", "")
+        if v_provider and v_key:
+            self._chat.configure_validator(v_provider, v_key, v_model)
 
     def _init_detector(self):
         """Initialize the platform-specific detector."""
@@ -100,6 +120,172 @@ class ScreenCompanionApp:
                 "Document detection is not available."
             )
 
+    def _on_edit_document(self):
+        """Open the Find & Replace dialog for the current document."""
+        if not self._current_doc_path:
+            self._chat_widget.add_system_message("No document to edit.")
+            return
+
+        ext = Path(self._current_doc_path).suffix.lower()
+        if ext not in SUPPORTED_EDIT_FORMATS:
+            self._chat_widget.add_system_message(
+                f"'{ext}' files cannot be edited. "
+                f"Editable: {', '.join(sorted(SUPPORTED_EDIT_FORMATS))}"
+            )
+            return
+
+        self._show_find_replace_dialog()
+
+    def _show_find_replace_dialog(self):
+        """Show Find & Replace dialog for the current document."""
+        colors = get_colors(self._mode)
+        filename = Path(self._current_doc_path).name
+
+        dialog = ctk.CTkToplevel(self._root)
+        dialog.title("Find & Replace")
+        dialog.geometry("340x310")
+        dialog.attributes("-topmost", True)
+        dialog.resizable(False, False)
+
+        # Center on screen
+        dialog.update_idletasks()
+        sw = dialog.winfo_screenwidth()
+        sh = dialog.winfo_screenheight()
+        x = (sw - 340) // 2
+        y = (sh - 310) // 2
+        dialog.geometry(f"340x310+{x}+{y}")
+
+        frame = ctk.CTkFrame(dialog, fg_color=colors["bg"], corner_radius=0)
+        frame.pack(fill="both", expand=True)
+
+        # Title with filename
+        ctk.CTkLabel(
+            frame,
+            text="Find & Replace",
+            font=get_font(FONT_SIZE_LG, "bold"),
+            text_color=colors["accent"],
+        ).pack(pady=(20, 4))
+
+        ctk.CTkLabel(
+            frame,
+            text=filename,
+            font=get_font(FONT_SIZE_SM),
+            text_color=colors["text_muted"],
+        ).pack(pady=(0, 12))
+
+        # Find field
+        ctk.CTkLabel(
+            frame,
+            text="Find",
+            font=get_font(FONT_SIZE_SM),
+            text_color=colors["text_muted"],
+            anchor="w",
+        ).pack(padx=24, anchor="w")
+
+        find_entry = ctk.CTkEntry(
+            frame,
+            placeholder_text="Text to find...",
+            font=get_font(FONT_SIZE),
+            fg_color=colors["input_bg"],
+            border_color=colors["input_border"],
+            text_color=colors["text"],
+            placeholder_text_color=colors["text_muted"],
+            width=292,
+            height=36,
+            corner_radius=CORNER_RADIUS_SM,
+        )
+        find_entry.pack(padx=24, pady=(4, 12))
+
+        # Replace field
+        ctk.CTkLabel(
+            frame,
+            text="Replace with",
+            font=get_font(FONT_SIZE_SM),
+            text_color=colors["text_muted"],
+            anchor="w",
+        ).pack(padx=24, anchor="w")
+
+        replace_entry = ctk.CTkEntry(
+            frame,
+            placeholder_text="Replacement text...",
+            font=get_font(FONT_SIZE),
+            fg_color=colors["input_bg"],
+            border_color=colors["input_border"],
+            text_color=colors["text"],
+            placeholder_text_color=colors["text_muted"],
+            width=292,
+            height=36,
+            corner_radius=CORNER_RADIUS_SM,
+        )
+        replace_entry.pack(padx=24, pady=(4, 16))
+
+        # Result label
+        result_var = ctk.StringVar(value="")
+        result_label = ctk.CTkLabel(
+            frame,
+            textvariable=result_var,
+            font=get_font(FONT_SIZE_SM),
+            text_color=colors["system_msg"],
+        )
+        result_label.pack(pady=(0, 8))
+
+        # Buttons
+        btn_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        btn_frame.pack(padx=24)
+
+        def _replace_all():
+            search = find_entry.get()
+            replace = replace_entry.get()
+            if not search:
+                result_var.set("Enter text to find.")
+                return
+            edits = [{"type": "replace", "search": search, "replace": replace}]
+            try:
+                result = apply_edits(self._current_doc_path, edits)
+                # Re-read document to update chat context
+                content = read_document(self._current_doc_path)
+                self._chat.set_document(self._current_doc_path, content)
+                # Show result in dialog and chat
+                lines = result.split("\n")
+                summary = lines[-1] if lines else result
+                result_var.set(summary)
+                self._chat_widget.add_system_message(f"Edit: {summary}")
+            except (UnsupportedEditError, PermissionError) as e:
+                result_var.set(f"Failed: {e}")
+            except Exception as e:
+                result_var.set(f"Error: {e}")
+
+        ctk.CTkButton(
+            btn_frame,
+            text="Replace All",
+            font=get_font(FONT_SIZE, "bold"),
+            fg_color=colors["accent"],
+            hover_color=colors["accent_hover"],
+            text_color=colors["text_on_accent"],
+            width=140,
+            height=38,
+            corner_radius=CORNER_RADIUS_SM,
+            command=_replace_all,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            btn_frame,
+            text="Cancel",
+            font=get_font(FONT_SIZE),
+            fg_color="transparent",
+            hover_color=colors["bg_glass"],
+            text_color=colors["text_muted"],
+            border_width=1,
+            border_color=colors["border_subtle"],
+            width=140,
+            height=38,
+            corner_radius=CORNER_RADIUS_SM,
+            command=dialog.destroy,
+        ).pack(side="left")
+
+        # Focus the find field
+        dialog.after(100, find_entry.focus_set)
+
     def _on_toggle(self):
         """Toggle the chat panel open/closed."""
         if self._chat_widget.is_visible():
@@ -121,7 +307,9 @@ class ScreenCompanionApp:
 
     def _process_document(self, path: str, filename: str):
         """Read and load document content (called on main thread)."""
-        self._chat_widget.set_document_status(filename)
+        ext = Path(path).suffix.lower()
+        editable = ext in SUPPORTED_EDIT_FORMATS
+        self._chat_widget.set_document_status(filename, editable=editable)
         self._toggle.set_doc_detected(True)
 
         try:
@@ -291,7 +479,7 @@ class ScreenCompanionApp:
 
         dialog = ctk.CTkToplevel(self._root)
         dialog.title("Screen Companion Settings")
-        dialog.geometry("340x380")
+        dialog.geometry("340x580")
         dialog.attributes("-topmost", True)
         dialog.resizable(False, False)
 
@@ -300,8 +488,8 @@ class ScreenCompanionApp:
         sw = dialog.winfo_screenwidth()
         sh = dialog.winfo_screenheight()
         x = (sw - 340) // 2
-        y = (sh - 380) // 2
-        dialog.geometry(f"340x380+{x}+{y}")
+        y = (sh - 580) // 2
+        dialog.geometry(f"340x580+{x}+{y}")
 
         frame = ctk.CTkFrame(
             dialog,
@@ -412,6 +600,106 @@ class ScreenCompanionApp:
         if existing_key:
             api_key_entry.insert(0, existing_key)
 
+        # ── Validator section ──────────────────────────────────────
+        ctk.CTkLabel(
+            frame,
+            text="Output Validator (optional)",
+            font=get_font(FONT_SIZE_SM, "bold"),
+            text_color=colors["accent"],
+            anchor="w",
+        ).pack(padx=24, pady=(12, 2), anchor="w")
+
+        ctk.CTkLabel(
+            frame,
+            text="Validator Provider",
+            font=get_font(FONT_SIZE_SM),
+            text_color=colors["text_muted"],
+            anchor="w",
+        ).pack(padx=24, anchor="w")
+
+        v_provider_names = {"(disabled)": ""} | {v["name"]: k for k, v in LLM_PROVIDERS.items()}
+        current_v_provider = self._config.get("validator_provider", "")
+        current_v_name = "(disabled)"
+        if current_v_provider:
+            current_v_name = LLM_PROVIDERS.get(current_v_provider, {}).get("name", "(disabled)")
+
+        v_provider_var = ctk.StringVar(value=current_v_name)
+        v_model_var = ctk.StringVar(value=self._config.get("validator_model", ""))
+
+        v_model_menu = ctk.CTkOptionMenu(
+            frame,
+            values=self._get_models_for_provider(current_v_provider) or [""],
+            variable=v_model_var,
+            fg_color=colors["input_bg"],
+            button_color=colors["accent"],
+            button_hover_color=colors["accent_hover"],
+            text_color=colors["text"],
+            font=get_font(FONT_SIZE),
+            width=292,
+            height=36,
+            corner_radius=CORNER_RADIUS_SM,
+        )
+
+        def _on_v_provider_change(name):
+            key = v_provider_names.get(name, "")
+            models = self._get_models_for_provider(key)
+            v_model_menu.configure(values=models or [""])
+            if models:
+                v_model_var.set(models[0])
+            else:
+                v_model_var.set("")
+
+        v_provider_menu = ctk.CTkOptionMenu(
+            frame,
+            values=list(v_provider_names.keys()),
+            variable=v_provider_var,
+            fg_color=colors["input_bg"],
+            button_color=colors["accent"],
+            button_hover_color=colors["accent_hover"],
+            text_color=colors["text"],
+            font=get_font(FONT_SIZE),
+            width=292,
+            height=36,
+            corner_radius=CORNER_RADIUS_SM,
+            command=_on_v_provider_change,
+        )
+        v_provider_menu.pack(padx=24, pady=(4, 8))
+
+        ctk.CTkLabel(
+            frame,
+            text="Validator Model",
+            font=get_font(FONT_SIZE_SM),
+            text_color=colors["text_muted"],
+            anchor="w",
+        ).pack(padx=24, anchor="w")
+        v_model_menu.pack(padx=24, pady=(4, 8))
+
+        ctk.CTkLabel(
+            frame,
+            text="Validator API Key",
+            font=get_font(FONT_SIZE_SM),
+            text_color=colors["text_muted"],
+            anchor="w",
+        ).pack(padx=24, anchor="w")
+
+        v_api_key_entry = ctk.CTkEntry(
+            frame,
+            placeholder_text="Leave blank to use primary key",
+            font=get_font(FONT_SIZE),
+            fg_color=colors["input_bg"],
+            border_color=colors["input_border"],
+            text_color=colors["text"],
+            placeholder_text_color=colors["text_muted"],
+            width=292,
+            height=36,
+            corner_radius=CORNER_RADIUS_SM,
+            show="*",
+        )
+        v_api_key_entry.pack(padx=24, pady=(4, 16))
+        existing_v_key = self._config.get("validator_api_key", "")
+        if existing_v_key:
+            v_api_key_entry.insert(0, existing_v_key)
+
         # Save button
         def _save():
             name = provider_var.get()
@@ -427,11 +715,29 @@ class ScreenCompanionApp:
             self._config["provider"] = provider_key
             self._config["model"] = model
             self._config["api_key"] = api_key
+
+            # Save validator config
+            v_name = v_provider_var.get()
+            v_key = v_provider_names.get(v_name, "")
+            v_api_key = v_api_key_entry.get().strip() or api_key  # fallback to primary key
+            v_model = v_model_var.get()
+            if v_key:
+                self._config["validator_provider"] = v_key
+                self._config["validator_model"] = v_model
+                self._config["validator_api_key"] = v_api_key
+                self._chat.configure_validator(v_key, v_api_key, v_model)
+            else:
+                self._config.pop("validator_provider", None)
+                self._config.pop("validator_model", None)
+                self._config.pop("validator_api_key", None)
+                self._chat.clear_validator()
+
             save_user_config(self._config)
 
+            validator_info = f" + {LLM_PROVIDERS[v_key]['name']} validator" if v_key else ""
             self._chat.configure(provider_key, api_key, model)
             self._chat_widget.add_system_message(
-                f"Configured: {name} / {model}"
+                f"Configured: {name} / {model}{validator_info}"
             )
             dialog.destroy()
 

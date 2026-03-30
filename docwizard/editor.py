@@ -1,11 +1,10 @@
-"""Document editing — search-replace with backup."""
+"""Document editing — replace, delete, insert_after with backup."""
 
 import csv
 import io
 import os
 import shutil
 from pathlib import Path
-from typing import Optional
 
 from docwizard.config import SUPPORTED_EDIT_FORMATS
 
@@ -15,9 +14,12 @@ class UnsupportedEditError(Exception):
 
 
 def apply_edits(path: str, edits: list[dict]) -> str:
-    """Apply search-replace edits to a document.
+    """Apply edits to a document.
 
-    Each edit: {"type": "replace", "search": "old text", "replace": "new text"}
+    Supported edit types:
+      replace:      {"type": "replace", "search": "...", "replace": "..."}
+      delete:       {"type": "delete", "search": "..."}
+      insert_after: {"type": "insert_after", "search": "...", "replace": "..."}
 
     Returns a summary of changes made.
     """
@@ -35,44 +37,79 @@ def apply_edits(path: str, edits: list[dict]) -> str:
     try:
         shutil.copy2(path, backup_path)
     except OSError:
-        pass  # Non-fatal — proceed without backup
-
-    specific_editors = {
-        ".csv": _edit_csv,
-        ".docx": _edit_docx,
-        ".xlsx": _edit_xlsx,
-    }
-    # All other editable formats use plain-text search-replace
-    editor_fn = specific_editors.get(ext, _edit_txt)
+        pass  # Non-fatal
 
     results = []
     for edit in edits:
-        if edit.get("type") != "replace":
-            results.append(f"Skipped unknown edit type: {edit.get('type')}")
-            continue
-
+        edit_type = edit.get("type", "replace")
         search = edit.get("search", "")
         replace = edit.get("replace", "")
 
         if not search:
-            results.append("Skipped edit with empty search string.")
+            results.append(f"Skipped edit with empty search string.")
             continue
 
-        count = editor_fn(path, search, replace)
-        if count > 0:
-            results.append(
-                f"Replaced '{_truncate(search, 40)}' → "
-                f"'{_truncate(replace, 40)}' ({count} occurrence{'s' if count > 1 else ''})"
-            )
+        if edit_type == "delete":
+            count = _dispatch_replace(ext, path, search, "")
+            if count > 0:
+                results.append(
+                    f"Deleted '{_truncate(search, 40)}' "
+                    f"({count} occurrence{'s' if count != 1 else ''})"
+                )
+            else:
+                results.append(f"No match found for '{_truncate(search, 40)}'")
+
+        elif edit_type == "replace":
+            count = _dispatch_replace(ext, path, search, replace)
+            if count > 0:
+                results.append(
+                    f"Replaced '{_truncate(search, 40)}' → "
+                    f"'{_truncate(replace, 40)}' "
+                    f"({count} occurrence{'s' if count != 1 else ''})"
+                )
+            else:
+                results.append(f"No match found for '{_truncate(search, 40)}'")
+
+        elif edit_type == "insert_after":
+            count = _dispatch_insert_after(ext, path, search, replace)
+            if count > 0:
+                results.append(
+                    f"Inserted content after '{_truncate(search, 40)}' "
+                    f"({count} location{'s' if count != 1 else ''})"
+                )
+            else:
+                results.append(f"No match found for '{_truncate(search, 40)}'")
+
         else:
-            results.append(f"No match found for '{_truncate(search, 40)}'")
+            results.append(f"Skipped unknown edit type: '{edit_type}'")
 
     summary = "\n".join(results)
     return f"Backup saved: {backup_path}\n{summary}"
 
 
-def _edit_txt(path: str, search: str, replace: str) -> int:
-    """Search-replace in a plain text file."""
+# ── Dispatch helpers ──────────────────────────────────────────────────
+
+def _dispatch_replace(ext: str, path: str, search: str, replace: str) -> int:
+    if ext == ".docx":
+        return _docx_replace(path, search, replace)
+    elif ext == ".csv":
+        return _csv_replace(path, search, replace)
+    elif ext == ".xlsx":
+        return _xlsx_replace(path, search, replace)
+    else:
+        return _txt_replace(path, search, replace)
+
+
+def _dispatch_insert_after(ext: str, path: str, search: str, content: str) -> int:
+    if ext == ".docx":
+        return _docx_insert_after(path, search, content)
+    else:
+        return _txt_insert_after(path, search, content)
+
+
+# ── Plain text ────────────────────────────────────────────────────────
+
+def _txt_replace(path: str, search: str, replace: str) -> int:
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         content = f.read()
 
@@ -85,8 +122,28 @@ def _edit_txt(path: str, search: str, replace: str) -> int:
     return count
 
 
-def _edit_csv(path: str, search: str, replace: str) -> int:
-    """Search-replace in a CSV file (cell values)."""
+def _txt_insert_after(path: str, search: str, content: str) -> int:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+
+    count = 0
+    new_lines = []
+    for line in lines:
+        new_lines.append(line)
+        if search in line:
+            new_lines.append(content + "\n")
+            count += 1
+
+    if count > 0:
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+
+    return count
+
+
+# ── CSV ───────────────────────────────────────────────────────────────
+
+def _csv_replace(path: str, search: str, replace: str) -> int:
     with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
         reader = csv.reader(f)
         rows = list(reader)
@@ -95,9 +152,8 @@ def _edit_csv(path: str, search: str, replace: str) -> int:
     for i, row in enumerate(rows):
         for j, cell in enumerate(row):
             if search in cell:
-                occurrences = cell.count(search)
+                count += cell.count(search)
                 rows[i][j] = cell.replace(search, replace)
-                count += occurrences
 
     if count > 0:
         with open(path, "w", encoding="utf-8", newline="") as f:
@@ -107,8 +163,22 @@ def _edit_csv(path: str, search: str, replace: str) -> int:
     return count
 
 
-def _edit_docx(path: str, search: str, replace: str) -> int:
-    """Search-replace in a DOCX file (paragraph text)."""
+# ── DOCX ──────────────────────────────────────────────────────────────
+
+def _merge_runs(para) -> None:
+    """Merge all runs in a paragraph into the first run, preserving its formatting.
+
+    This ensures search strings that span multiple runs are handled correctly.
+    """
+    if len(para.runs) <= 1:
+        return
+    full_text = "".join(run.text for run in para.runs)
+    para.runs[0].text = full_text
+    for run in para.runs[1:]:
+        run.text = ""
+
+
+def _docx_replace(path: str, search: str, replace: str) -> int:
     from docx import Document
 
     doc = Document(path)
@@ -116,26 +186,9 @@ def _edit_docx(path: str, search: str, replace: str) -> int:
 
     for para in doc.paragraphs:
         if search in para.text:
-            # Replace in runs to preserve some formatting
-            full_text = para.text
-            occurrences = full_text.count(search)
-            count += occurrences
-
-            # Simple approach: rebuild paragraph text across runs
-            for run in para.runs:
-                if search in run.text:
-                    run.text = run.text.replace(search, replace)
-
-            # If runs didn't cover it (search spans multiple runs),
-            # fall back to replacing in the first run
-            if search in para.text:
-                # The replacement didn't work across runs, try again
-                new_text = para.text.replace(search, replace)
-                for i, run in enumerate(para.runs):
-                    if i == 0:
-                        run.text = new_text
-                    else:
-                        run.text = ""
+            count += para.text.count(search)
+            _merge_runs(para)
+            para.runs[0].text = para.runs[0].text.replace(search, replace)
 
     if count > 0:
         doc.save(path)
@@ -143,8 +196,31 @@ def _edit_docx(path: str, search: str, replace: str) -> int:
     return count
 
 
-def _edit_xlsx(path: str, search: str, replace: str) -> int:
-    """Search-replace in an XLSX file (cell values)."""
+def _docx_insert_after(path: str, search: str, content: str) -> int:
+    from docx import Document
+    from docx.oxml import OxmlElement
+
+    doc = Document(path)
+    matches = [para for para in doc.paragraphs if search in para.text]
+
+    for para in matches:
+        new_para = OxmlElement("w:p")
+        new_run = OxmlElement("w:r")
+        new_text = OxmlElement("w:t")
+        new_text.text = content
+        new_run.append(new_text)
+        new_para.append(new_run)
+        para._element.addnext(new_para)
+
+    if matches:
+        doc.save(path)
+
+    return len(matches)
+
+
+# ── XLSX ──────────────────────────────────────────────────────────────
+
+def _xlsx_replace(path: str, search: str, replace: str) -> int:
     from openpyxl import load_workbook
 
     wb = load_workbook(path)
@@ -154,9 +230,8 @@ def _edit_xlsx(path: str, search: str, replace: str) -> int:
         for row in ws.iter_rows():
             for cell in row:
                 if cell.value and isinstance(cell.value, str) and search in cell.value:
-                    occurrences = cell.value.count(search)
+                    count += cell.value.count(search)
                     cell.value = cell.value.replace(search, replace)
-                    count += occurrences
 
     if count > 0:
         wb.save(path)
@@ -165,8 +240,9 @@ def _edit_xlsx(path: str, search: str, replace: str) -> int:
     return count
 
 
+# ── Utility ───────────────────────────────────────────────────────────
+
 def _truncate(text: str, max_len: int) -> str:
-    """Truncate text for display."""
     if len(text) <= max_len:
         return text
     return text[: max_len - 3] + "..."

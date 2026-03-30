@@ -4,7 +4,10 @@ import json
 import re
 from typing import Optional
 
-from docwizard.config import SYSTEM_PROMPT, LLM_PROVIDERS, load_user_config
+from docwizard.config import (
+    SYSTEM_PROMPT, LLM_PROVIDERS, load_user_config,
+    VALIDATOR_SYSTEM_PROMPT, VALIDATOR_USER_TEMPLATE,
+)
 
 
 class DocumentChat:
@@ -18,6 +21,9 @@ class DocumentChat:
         self._provider: str = ""
         self._model: str = ""
         self._api_key: str = ""
+        self._validator_provider: str = ""
+        self._validator_model: str = ""
+        self._validator_api_key: str = ""
 
     def configure(self, provider: str, api_key: str, model: str = ""):
         """Set the LLM provider and API key."""
@@ -26,8 +32,22 @@ class DocumentChat:
         self._model = model or LLM_PROVIDERS[provider]["default_model"]
         self._client = None  # Reset client to force re-init
 
+    def configure_validator(self, provider: str, api_key: str, model: str = ""):
+        """Set an optional secondary model to validate output completeness."""
+        self._validator_provider = provider
+        self._validator_api_key = api_key
+        self._validator_model = model or LLM_PROVIDERS[provider]["default_model"]
+
+    def clear_validator(self):
+        self._validator_provider = ""
+        self._validator_api_key = ""
+        self._validator_model = ""
+
     def is_configured(self) -> bool:
         return bool(self._provider and self._api_key)
+
+    def has_validator(self) -> bool:
+        return bool(self._validator_provider and self._validator_api_key)
 
     def set_document(self, path: str, content: str):
         """Update document context. Clears conversation history."""
@@ -53,12 +73,111 @@ class DocumentChat:
                 response = f"Unknown provider: {self._provider}"
         except Exception as e:
             error_msg = str(e)
-            # Don't add error responses to history
             self.messages.pop()
             return f"API Error: {error_msg}"
 
+        # Validate completeness with a second model if configured
+        if self.has_validator():
+            try:
+                is_complete, reason = self._validate_response(user_message, response)
+                if not is_complete:
+                    response = self._request_completion(user_message, response, reason)
+            except Exception:
+                pass  # Never block the user due to validator failure
+
         self.messages.append({"role": "assistant", "content": response})
         return response
+
+    def _validate_response(self, question: str, response: str) -> tuple[bool, str]:
+        """Ask the validator model whether the response is complete.
+
+        Returns (is_complete, reason).
+        """
+        prompt = VALIDATOR_USER_TEMPLATE.format(question=question, response=response)
+        messages = [{"role": "user", "content": prompt}]
+        raw = self._call_one_shot(
+            self._validator_provider,
+            self._validator_api_key,
+            self._validator_model,
+            VALIDATOR_SYSTEM_PROMPT,
+            messages,
+        )
+        try:
+            data = json.loads(raw.strip())
+            return bool(data.get("complete", True)), data.get("reason", "")
+        except (json.JSONDecodeError, AttributeError):
+            return True, ""
+
+    def _request_completion(self, original_question: str, partial: str, reason: str) -> str:
+        """Ask the primary model to complete a truncated response."""
+        followup = (
+            f"Your previous response was incomplete ({reason}). "
+            f"Please provide the full, complete answer to the original question without repeating the part you already covered. "
+            f"Original question: {original_question}"
+        )
+        temp_messages = list(self.messages) + [
+            {"role": "assistant", "content": partial},
+            {"role": "user", "content": followup},
+        ]
+        try:
+            completion = self._call_one_shot(
+                self._provider,
+                self._api_key,
+                self._model,
+                self._build_system_prompt(),
+                temp_messages,
+            )
+            return partial + "\n\n" + completion
+        except Exception:
+            return partial
+
+    def _call_one_shot(
+        self,
+        provider: str,
+        api_key: str,
+        model: str,
+        system: str,
+        messages: list[dict],
+    ) -> str:
+        """Make a single stateless API call to any provider."""
+        if provider == "anthropic":
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            resp = client.messages.create(
+                model=model,
+                max_tokens=1024,
+                system=system,
+                messages=messages,
+            )
+            return resp.content[0].text
+
+        elif provider == "openai":
+            import openai
+            client = openai.OpenAI(api_key=api_key)
+            full_messages = [{"role": "system", "content": system}, *messages]
+            resp = client.chat.completions.create(
+                model=model,
+                messages=full_messages,
+                max_tokens=1024,
+            )
+            return resp.choices[0].message.content
+
+        elif provider == "google":
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            gmodel = genai.GenerativeModel(
+                model_name=model,
+                system_instruction=system,
+            )
+            history = []
+            for msg in messages[:-1]:
+                role = "user" if msg["role"] == "user" else "model"
+                history.append({"role": role, "parts": [msg["content"]]})
+            chat = gmodel.start_chat(history=history)
+            resp = chat.send_message(messages[-1]["content"])
+            return resp.text
+
+        raise ValueError(f"Unknown provider: {provider}")
 
     def _build_system_prompt(self) -> str:
         """Build system prompt with document context."""
@@ -79,7 +198,7 @@ class DocumentChat:
 
         response = self._client.messages.create(
             model=self._model,
-            max_tokens=4096,
+            max_tokens=8192,
             system=self._build_system_prompt(),
             messages=self.messages,
         )
@@ -100,7 +219,7 @@ class DocumentChat:
         response = self._client.chat.completions.create(
             model=self._model,
             messages=messages,
-            max_tokens=4096,
+            max_tokens=8192,
         )
         return response.choices[0].message.content
 
