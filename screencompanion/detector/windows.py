@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from docwizard.config import WIN_COM_MAP, SUPPORTED_READ_FORMATS
-from docwizard.detector.base import BaseDetector
+from screencompanion.config import WIN_COM_MAP, SUPPORTED_READ_FORMATS
+from screencompanion.detector.base import BaseDetector
 
 
 class WindowsDetector(BaseDetector):

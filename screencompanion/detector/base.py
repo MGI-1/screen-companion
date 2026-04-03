@@ -5,7 +5,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
-from docwizard.config import POLL_INTERVAL_SECONDS
+from screencompanion.config import POLL_INTERVAL_SECONDS
 
 
 class BaseDetector(ABC):

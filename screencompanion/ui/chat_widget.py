@@ -5,7 +5,7 @@ import customtkinter as ctk
 from datetime import datetime
 from typing import Callable, Optional
 
-from docwizard.ui.theme import (
+from screencompanion.ui.theme import (
     get_colors,
     get_font,
     CORNER_RADIUS,
@@ -16,7 +16,7 @@ from docwizard.ui.theme import (
     FONT_SIZE_LG,
     FONT_SIZE_TITLE,
 )
-from docwizard.config import WINDOW_WIDTH, WINDOW_HEIGHT
+from screencompanion.config import WINDOW_WIDTH, WINDOW_HEIGHT
 
 
 class ChatWidget(ctk.CTkToplevel):

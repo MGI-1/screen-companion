@@ -8,7 +8,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
-from docwizard.config import (
+from screencompanion.config import (
     LLM_PROVIDERS,
     SUPPORTED_EDIT_FORMATS,
     WINDOW_WIDTH,
@@ -16,12 +16,12 @@ from docwizard.config import (
     load_user_config,
     save_user_config,
 )
-from docwizard.ui.theme import get_colors, get_font, CORNER_RADIUS, CORNER_RADIUS_SM, FONT_SIZE, FONT_SIZE_SM, FONT_SIZE_LG, PANEL_PADDING
-from docwizard.ui.toggle_button import ToggleButton
-from docwizard.ui.chat_widget import ChatWidget
-from docwizard.chat import DocumentChat
-from docwizard.reader import read_document, UnsupportedFormatError, FileTooLargeError
-from docwizard.editor import apply_edits, UnsupportedEditError
+from screencompanion.ui.theme import get_colors, get_font, CORNER_RADIUS, CORNER_RADIUS_SM, FONT_SIZE, FONT_SIZE_SM, FONT_SIZE_LG, PANEL_PADDING
+from screencompanion.ui.toggle_button import ToggleButton
+from screencompanion.ui.chat_widget import ChatWidget
+from screencompanion.chat import DocumentChat
+from screencompanion.reader import read_document, read_dataframe, UnsupportedFormatError, FileTooLargeError
+from screencompanion.editor import apply_edits, UnsupportedEditError
 
 
 class ScreenCompanionApp:
@@ -87,15 +87,14 @@ class ScreenCompanionApp:
         # Load optional validator config
         v_provider = self._config.get("validator_provider", "")
         v_key = self._config.get("validator_api_key", "")
-        v_model = self._config.get("validator_model", "")
         if v_provider and v_key:
-            self._chat.configure_validator(v_provider, v_key, v_model)
+            self._chat.configure_validator(v_provider, v_key)
 
     def _init_detector(self):
         """Initialize the platform-specific detector."""
         try:
-            from docwizard.detector import Detector
-            from docwizard.detector.base import FocusWatcher
+            from screencompanion.detector import Detector
+            from screencompanion.detector.base import FocusWatcher
 
             self._detector = Detector()
             self._watcher = FocusWatcher(
@@ -243,8 +242,9 @@ class ScreenCompanionApp:
             try:
                 result = apply_edits(self._current_doc_path, edits)
                 # Re-read document to update chat context
-                content = read_document(self._current_doc_path)
-                self._chat.set_document(self._current_doc_path, content)
+                doc = read_document(self._current_doc_path)
+                df = read_dataframe(self._current_doc_path)
+                self._chat.set_document(self._current_doc_path, doc.text, doc.images, dataframe=df)
                 # Show result in dialog and chat
                 lines = result.split("\n")
                 summary = lines[-1] if lines else result
@@ -313,10 +313,13 @@ class ScreenCompanionApp:
         self._toggle.set_doc_detected(True)
 
         try:
-            content = read_document(path)
-            self._chat.set_document(path, content)
+            result = read_document(path)
+            df = read_dataframe(path)
+            self._chat.set_document(path, result.text, result.images, dataframe=df)
+            img_note = f", {len(result.images)} image(s)" if result.images else ""
+            df_note = f", {len(df):,} rows (code mode)" if df is not None else ""
             self._chat_widget.add_system_message(
-                f"Loaded: {filename} ({len(content):,} chars)"
+                f"Loaded: {filename} ({len(result.text):,} chars{img_note}{df_note})"
             )
         except (UnsupportedFormatError, FileTooLargeError, FileNotFoundError) as e:
             self._chat_widget.add_system_message(str(e))
@@ -392,8 +395,9 @@ class ScreenCompanionApp:
             self._chat_widget.add_system_message(f"Edits applied:\n{result}")
 
             # Re-read the document
-            content = read_document(self._current_doc_path)
-            self._chat.set_document(self._current_doc_path, content)
+            doc = read_document(self._current_doc_path)
+            df = read_dataframe(self._current_doc_path)
+            self._chat.set_document(self._current_doc_path, doc.text, doc.images, dataframe=df)
         except (UnsupportedEditError, PermissionError) as e:
             self._chat_widget.add_system_message(f"Edit failed: {e}")
         except Exception as e:
@@ -624,30 +628,6 @@ class ScreenCompanionApp:
             current_v_name = LLM_PROVIDERS.get(current_v_provider, {}).get("name", "(disabled)")
 
         v_provider_var = ctk.StringVar(value=current_v_name)
-        v_model_var = ctk.StringVar(value=self._config.get("validator_model", ""))
-
-        v_model_menu = ctk.CTkOptionMenu(
-            frame,
-            values=self._get_models_for_provider(current_v_provider) or [""],
-            variable=v_model_var,
-            fg_color=colors["input_bg"],
-            button_color=colors["accent"],
-            button_hover_color=colors["accent_hover"],
-            text_color=colors["text"],
-            font=get_font(FONT_SIZE),
-            width=292,
-            height=36,
-            corner_radius=CORNER_RADIUS_SM,
-        )
-
-        def _on_v_provider_change(name):
-            key = v_provider_names.get(name, "")
-            models = self._get_models_for_provider(key)
-            v_model_menu.configure(values=models or [""])
-            if models:
-                v_model_var.set(models[0])
-            else:
-                v_model_var.set("")
 
         v_provider_menu = ctk.CTkOptionMenu(
             frame,
@@ -661,18 +641,8 @@ class ScreenCompanionApp:
             width=292,
             height=36,
             corner_radius=CORNER_RADIUS_SM,
-            command=_on_v_provider_change,
         )
         v_provider_menu.pack(padx=24, pady=(4, 8))
-
-        ctk.CTkLabel(
-            frame,
-            text="Validator Model",
-            font=get_font(FONT_SIZE_SM),
-            text_color=colors["text_muted"],
-            anchor="w",
-        ).pack(padx=24, anchor="w")
-        v_model_menu.pack(padx=24, pady=(4, 8))
 
         ctk.CTkLabel(
             frame,
@@ -720,15 +690,13 @@ class ScreenCompanionApp:
             v_name = v_provider_var.get()
             v_key = v_provider_names.get(v_name, "")
             v_api_key = v_api_key_entry.get().strip() or api_key  # fallback to primary key
-            v_model = v_model_var.get()
             if v_key:
                 self._config["validator_provider"] = v_key
-                self._config["validator_model"] = v_model
                 self._config["validator_api_key"] = v_api_key
-                self._chat.configure_validator(v_key, v_api_key, v_model)
+                self._chat.configure_validator(v_key, v_api_key)
             else:
                 self._config.pop("validator_provider", None)
-                self._config.pop("validator_model", None)
+                self._config.pop("validator_model", None)  # clean up legacy key
                 self._config.pop("validator_api_key", None)
                 self._chat.clear_validator()
 

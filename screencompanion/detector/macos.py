@@ -5,8 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from docwizard.config import APP_SCRIPT_MAP, WINDOW_TITLE_APPS, SUPPORTED_READ_FORMATS
-from docwizard.detector.base import BaseDetector
+from screencompanion.config import APP_SCRIPT_MAP, WINDOW_TITLE_APPS, SUPPORTED_READ_FORMATS
+from screencompanion.detector.base import BaseDetector
 
 
 class MacOSDetector(BaseDetector):

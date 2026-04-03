@@ -6,7 +6,7 @@ import os
 import shutil
 from pathlib import Path
 
-from docwizard.config import SUPPORTED_EDIT_FORMATS
+from screencompanion.config import SUPPORTED_EDIT_FORMATS
 
 
 class UnsupportedEditError(Exception):

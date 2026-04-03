@@ -4,9 +4,10 @@ import json
 import re
 from typing import Optional
 
-from docwizard.config import (
+from screencompanion.config import (
     SYSTEM_PROMPT, LLM_PROVIDERS, load_user_config,
-    VALIDATOR_SYSTEM_PROMPT, VALIDATOR_USER_TEMPLATE,
+    RECONCILE_SYSTEM_PROMPT, RECONCILE_USER_TEMPLATE,
+    CODE_GEN_SYSTEM_PROMPT, CODE_GEN_USER_TEMPLATE,
 )
 
 
@@ -22,8 +23,10 @@ class DocumentChat:
         self._model: str = ""
         self._api_key: str = ""
         self._validator_provider: str = ""
-        self._validator_model: str = ""
         self._validator_api_key: str = ""
+        self.document_images: list = []   # list[ImageData]
+        self._images_pending: bool = False
+        self._dataframe = None  # pandas DataFrame for CSV/XLSX files
 
     def configure(self, provider: str, api_key: str, model: str = ""):
         """Set the LLM provider and API key."""
@@ -32,16 +35,14 @@ class DocumentChat:
         self._model = model or LLM_PROVIDERS[provider]["default_model"]
         self._client = None  # Reset client to force re-init
 
-    def configure_validator(self, provider: str, api_key: str, model: str = ""):
-        """Set an optional secondary model to validate output completeness."""
+    def configure_validator(self, provider: str, api_key: str):
+        """Set an optional validator that checks completeness using all 3 models of the provider."""
         self._validator_provider = provider
         self._validator_api_key = api_key
-        self._validator_model = model or LLM_PROVIDERS[provider]["default_model"]
 
     def clear_validator(self):
         self._validator_provider = ""
         self._validator_api_key = ""
-        self._validator_model = ""
 
     def is_configured(self) -> bool:
         return bool(self._provider and self._api_key)
@@ -49,11 +50,14 @@ class DocumentChat:
     def has_validator(self) -> bool:
         return bool(self._validator_provider and self._validator_api_key)
 
-    def set_document(self, path: str, content: str):
+    def set_document(self, path: str, content: str, images: list = None, dataframe=None):
         """Update document context. Clears conversation history."""
         self.document_content = content
         self.document_path = path
         self.messages = []
+        self.document_images = images or []
+        self._images_pending = bool(self.document_images)
+        self._dataframe = dataframe
 
     def ask(self, user_message: str) -> str:
         """Send a message and return the LLM response."""
@@ -62,74 +66,132 @@ class DocumentChat:
 
         self.messages.append({"role": "user", "content": user_message})
 
+        # For structured data (CSV/XLSX), execute pandas code for precise answers
+        if self._dataframe is not None:
+            try:
+                response = self._ask_with_code(user_message)
+                self.messages.append({"role": "assistant", "content": response})
+                return response
+            except Exception:
+                pass  # Fall through to regular LLM path
+
+        inject_images = self._images_pending
+        if inject_images:
+            self._images_pending = False  # clear before call; restore on error
+
         try:
             if self._provider == "anthropic":
-                response = self._ask_anthropic()
+                response = self._ask_anthropic(inject_images)
             elif self._provider == "openai":
-                response = self._ask_openai()
+                response = self._ask_openai(inject_images)
             elif self._provider == "google":
-                response = self._ask_google()
+                response = self._ask_google(inject_images)
             else:
                 response = f"Unknown provider: {self._provider}"
         except Exception as e:
             error_msg = str(e)
             self.messages.pop()
+            if inject_images:
+                self._images_pending = True  # restore so user can retry
             return f"API Error: {error_msg}"
 
-        # Validate completeness with a second model if configured
+        if inject_images:
+            self.document_images = []  # free memory after successful send
+
+        # Cross-check with 3 independent validator models and reconcile
         if self.has_validator():
             try:
-                is_complete, reason = self._validate_response(user_message, response)
-                if not is_complete:
-                    response = self._request_completion(user_message, response, reason)
+                validator_answers = self._get_validator_answers(user_message)
+                if validator_answers:
+                    response = self._reconcile(user_message, response, validator_answers)
             except Exception:
                 pass  # Never block the user due to validator failure
 
         self.messages.append({"role": "assistant", "content": response})
         return response
 
-    def _validate_response(self, question: str, response: str) -> tuple[bool, str]:
-        """Ask the validator model whether the response is complete.
+    def _ask_with_code(self, question: str) -> str:
+        """Generate pandas code via LLM, execute it, and return the result."""
+        import pandas as pd
 
-        Returns (is_complete, reason).
-        """
-        prompt = VALIDATOR_USER_TEMPLATE.format(question=question, response=response)
-        messages = [{"role": "user", "content": prompt}]
+        df = self._dataframe
+        schema = "\n".join(f"  {col}: {dtype}" for col, dtype in df.dtypes.items())
+        sample = df.head(3).to_string(index=False)
+
         raw = self._call_one_shot(
-            self._validator_provider,
-            self._validator_api_key,
-            self._validator_model,
-            VALIDATOR_SYSTEM_PROMPT,
-            messages,
+            self._provider,
+            self._api_key,
+            self._model,
+            CODE_GEN_SYSTEM_PROMPT,
+            [{"role": "user", "content": CODE_GEN_USER_TEMPLATE.format(
+                schema=schema, sample=sample, question=question,
+            )}],
         )
-        try:
-            data = json.loads(raw.strip())
-            return bool(data.get("complete", True)), data.get("reason", "")
-        except (json.JSONDecodeError, AttributeError):
-            return True, ""
 
-    def _request_completion(self, original_question: str, partial: str, reason: str) -> str:
-        """Ask the primary model to complete a truncated response."""
-        followup = (
-            f"Your previous response was incomplete ({reason}). "
-            f"Please provide the full, complete answer to the original question without repeating the part you already covered. "
-            f"Original question: {original_question}"
+        # Strip markdown fences if the model wrapped the code
+        code = raw.strip()
+        if code.startswith("```"):
+            code = re.sub(r"^```[a-z]*\n?", "", code)
+            code = re.sub(r"\n?```$", "", code.strip())
+        code = code.strip()
+
+        safe_builtins = {
+            "len": len, "str": str, "int": int, "float": float,
+            "round": round, "list": list, "dict": dict, "sorted": sorted,
+            "sum": sum, "min": min, "max": max, "range": range,
+            "enumerate": enumerate, "zip": zip, "bool": bool,
+            "isinstance": isinstance, "abs": abs, "print": print,
+        }
+        namespace = {"df": df.copy(), "pd": pd, "__builtins__": safe_builtins}
+        exec(code, namespace)  # noqa: S102
+
+        result = namespace.get("result")
+        if result is None:
+            raise ValueError("Code did not set `result`")
+
+        if hasattr(result, "to_string"):
+            return result.to_string(index=False)
+        return str(result)
+
+    def _get_validator_answers(self, question: str) -> list[str]:
+        """Get independent answers from all 3 models of the validator provider."""
+        models = LLM_PROVIDERS.get(self._validator_provider, {}).get("models", [])
+        system = self._build_system_prompt()  # includes document context
+        messages = [{"role": "user", "content": question}]
+        answers = []
+        for model in models:
+            try:
+                answer = self._call_one_shot(
+                    self._validator_provider,
+                    self._validator_api_key,
+                    model,
+                    system,
+                    messages,
+                )
+                answers.append(answer)
+            except Exception:
+                pass
+        return answers
+
+    def _reconcile(self, question: str, primary: str, validator_answers: list[str]) -> str:
+        """Ask the primary model to reconcile its answer against the validator answers."""
+        answers_text = "\n\n".join(f"[{i + 1}] {a}" for i, a in enumerate(validator_answers))
+        user_content = RECONCILE_USER_TEMPLATE.format(
+            document=self.document_content or "No document loaded.",
+            question=question,
+            primary=primary,
+            answers=answers_text,
         )
-        temp_messages = list(self.messages) + [
-            {"role": "assistant", "content": partial},
-            {"role": "user", "content": followup},
-        ]
         try:
-            completion = self._call_one_shot(
+            return self._call_one_shot(
                 self._provider,
                 self._api_key,
                 self._model,
-                self._build_system_prompt(),
-                temp_messages,
+                RECONCILE_SYSTEM_PROMPT,
+                [{"role": "user", "content": user_content}],
             )
-            return partial + "\n\n" + completion
         except Exception:
-            return partial
+            return primary
 
     def _call_one_shot(
         self,
@@ -189,24 +251,42 @@ class DocumentChat:
             )
         return prompt
 
-    def _ask_anthropic(self) -> str:
+    def _ask_anthropic(self, inject_images: bool = False) -> str:
         """Call Anthropic Claude API."""
         import anthropic
+        import base64
 
         if not self._client:
             self._client = anthropic.Anthropic(api_key=self._api_key)
+
+        messages = list(self.messages)
+
+        if inject_images and self.document_images:
+            content_blocks = []
+            for img in self.document_images:
+                content_blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.media_type,
+                        "data": base64.standard_b64encode(img.data).decode("utf-8"),
+                    },
+                })
+            content_blocks.append({"type": "text", "text": messages[-1]["content"]})
+            messages = messages[:-1] + [{"role": "user", "content": content_blocks}]
 
         response = self._client.messages.create(
             model=self._model,
             max_tokens=8192,
             system=self._build_system_prompt(),
-            messages=self.messages,
+            messages=messages,
         )
         return response.content[0].text
 
-    def _ask_openai(self) -> str:
+    def _ask_openai(self, inject_images: bool = False) -> str:
         """Call OpenAI GPT API."""
         import openai
+        import base64
 
         if not self._client:
             self._client = openai.OpenAI(api_key=self._api_key)
@@ -216,6 +296,17 @@ class DocumentChat:
             *self.messages,
         ]
 
+        if inject_images and self.document_images:
+            content_parts = []
+            for img in self.document_images:
+                b64 = base64.standard_b64encode(img.data).decode("utf-8")
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{img.media_type};base64,{b64}"},
+                })
+            content_parts.append({"type": "text", "text": messages[-1]["content"]})
+            messages[-1] = {"role": "user", "content": content_parts}
+
         response = self._client.chat.completions.create(
             model=self._model,
             messages=messages,
@@ -223,7 +314,7 @@ class DocumentChat:
         )
         return response.choices[0].message.content
 
-    def _ask_google(self) -> str:
+    def _ask_google(self, inject_images: bool = False) -> str:
         """Call Google Gemini API."""
         import google.generativeai as genai
 
@@ -241,7 +332,19 @@ class DocumentChat:
             history.append({"role": role, "parts": [msg["content"]]})
 
         chat = self._client.start_chat(history=history)
-        response = chat.send_message(self.messages[-1]["content"])
+        last_text = self.messages[-1]["content"]
+
+        if inject_images and self.document_images:
+            from google.generativeai import types as genai_types
+            parts = [
+                genai_types.Part.from_bytes(data=img.data, mime_type=img.media_type)
+                for img in self.document_images
+            ]
+            parts.append(last_text)
+            response = chat.send_message(parts)
+        else:
+            response = chat.send_message(last_text)
+
         return response.text
 
     @staticmethod

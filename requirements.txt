@@ -8,11 +8,15 @@ customtkinter>=5.2.0
 Pillow>=10.0.0
 pystray>=0.19.0
 
+# Data processing
+pandas>=2.0.0
+
 # Document readers
 pdfplumber>=0.11.0
 python-docx>=1.0.0
 openpyxl>=3.1.0
 python-pptx>=1.0.0
+pymupdf>=1.24.0
 
 # Platform-specific
 pywin32>=305; sys_platform == "win32"

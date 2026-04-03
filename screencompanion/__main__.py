@@ -1,6 +1,6 @@
 """Entry point: python -m docwizard"""
 
-from docwizard.app import main
+from screencompanion.app import main
 
 if __name__ == "__main__":
     main()

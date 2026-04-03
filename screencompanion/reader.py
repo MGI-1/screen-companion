@@ -4,10 +4,28 @@ import csv
 import io
 import os
 import re
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from docwizard.config import SUPPORTED_READ_FORMATS, MAX_CONTENT_CHARS, MAX_FILE_SIZE_MB
+from screencompanion.config import SUPPORTED_READ_FORMATS, MAX_CONTENT_CHARS, MAX_FILE_SIZE_MB
+
+MAX_IMAGES = 20
+MIN_IMAGE_DIM = 50  # skip tiny icons/bullets
+
+
+@dataclass
+class ImageData:
+    data: bytes
+    media_type: str   # "image/png" or "image/jpeg"
+    page_or_slide: int
+    index: int
+
+
+@dataclass
+class DocumentResult:
+    text: str
+    images: list = field(default_factory=list)  # list[ImageData]
 
 
 class UnsupportedFormatError(Exception):
@@ -18,8 +36,26 @@ class FileTooLargeError(Exception):
     pass
 
 
-def read_document(path: str) -> str:
-    """Read document content as plain text.
+def read_dataframe(path: str):
+    """Return a pandas DataFrame for CSV/XLSX files, or None for other formats."""
+    try:
+        import pandas as pd
+    except ImportError:
+        return None
+
+    ext = Path(path).suffix.lower()
+    try:
+        if ext == ".csv":
+            return pd.read_csv(path)
+        elif ext in (".xlsx", ".xls"):
+            return pd.read_excel(path)
+    except Exception:
+        return None
+    return None
+
+
+def read_document(path: str) -> DocumentResult:
+    """Read document content as text plus any embedded images.
 
     Raises UnsupportedFormatError for unknown formats,
     FileTooLargeError for files exceeding MAX_FILE_SIZE_MB.
@@ -63,17 +99,26 @@ def read_document(path: str) -> str:
     }
 
     reader = specific_readers.get(ext, _read_plain_text)
-    content = reader(path)
+    text = reader(path)
 
-    # Truncate if too long
-    if len(content) > MAX_CONTENT_CHARS:
-        content = (
-            content[:MAX_CONTENT_CHARS]
+    # Truncate text if too long
+    if len(text) > MAX_CONTENT_CHARS:
+        text = (
+            text[:MAX_CONTENT_CHARS]
             + f"\n\n[Content truncated at {MAX_CONTENT_CHARS:,} characters. "
             "Ask about specific sections for more detail.]"
         )
 
-    return content
+    # Extract embedded images for supported formats
+    image_extractors = {
+        ".pdf": _extract_images_pdf,
+        ".docx": _extract_images_docx,
+        ".pptx": _extract_images_pptx,
+    }
+    extractor = image_extractors.get(ext)
+    images = extractor(path) if extractor else []
+
+    return DocumentResult(text=text, images=images)
 
 
 # ── Plain text (catch-all for .txt, .md, .json, .xml, .py, .log, etc.) ──
@@ -333,3 +378,128 @@ def _read_odf(path: str) -> str:
         pass
 
     return f"[Could not extract text from {ext} file.]"
+
+
+# ── Image extraction ──────────────────────────────────────────────────
+
+_ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg"}
+
+
+def _extract_images_pdf(path: str) -> list:
+    """Extract embedded images from a PDF using PyMuPDF (optional dep)."""
+    try:
+        import fitz  # pymupdf
+    except ImportError:
+        return []
+
+    images = []
+    try:
+        doc = fitz.open(path)
+        for page_num, page in enumerate(doc, start=1):
+            for img_index, img_info in enumerate(page.get_images(full=True)):
+                xref = img_info[0]
+                try:
+                    base = doc.extract_image(xref)
+                except Exception:
+                    continue
+                w, h = base.get("width", 0), base.get("height", 0)
+                if w < MIN_IMAGE_DIM or h < MIN_IMAGE_DIM:
+                    continue
+                ext = base.get("ext", "png")
+                media_type = "image/jpeg" if ext in ("jpeg", "jpg") else "image/png"
+                images.append(ImageData(
+                    data=base["image"],
+                    media_type=media_type,
+                    page_or_slide=page_num,
+                    index=img_index,
+                ))
+                if len(images) >= MAX_IMAGES:
+                    break
+            if len(images) >= MAX_IMAGES:
+                break
+        doc.close()
+    except Exception:
+        pass
+
+    return images
+
+
+def _extract_images_docx(path: str) -> list:
+    """Extract embedded images from a DOCX file."""
+    try:
+        from docx import Document
+    except ImportError:
+        return []
+
+    images = []
+    seen_rids: set = set()
+    try:
+        doc = Document(path)
+        for rel in doc.part.rels.values():
+            if "/image" not in rel.reltype:
+                continue
+            if rel.rId in seen_rids:
+                continue
+            seen_rids.add(rel.rId)
+            try:
+                img_part = rel.target_part
+                content_type = img_part.content_type
+                if content_type not in _ALLOWED_IMAGE_TYPES:
+                    continue
+                images.append(ImageData(
+                    data=img_part.blob,
+                    media_type=content_type,
+                    page_or_slide=0,
+                    index=len(images),
+                ))
+            except Exception:
+                continue
+            if len(images) >= MAX_IMAGES:
+                break
+    except Exception:
+        pass
+
+    return images
+
+
+def _extract_images_pptx(path: str) -> list:
+    """Extract embedded images from a PPTX file."""
+    try:
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+    except ImportError:
+        return []
+
+    images = []
+    seen_hashes: set = set()
+    try:
+        prs = Presentation(path)
+        for slide_num, slide in enumerate(prs.slides, start=1):
+            for shape in slide.shapes:
+                if shape.shape_type != MSO_SHAPE_TYPE.PICTURE:
+                    continue
+                try:
+                    img = shape.image
+                    blob_hash = hash(img.blob[:256])
+                    if blob_hash in seen_hashes:
+                        continue
+                    seen_hashes.add(blob_hash)
+                    content_type = img.content_type
+                    if content_type not in _ALLOWED_IMAGE_TYPES:
+                        continue
+                    images.append(ImageData(
+                        data=img.blob,
+                        media_type=content_type,
+                        page_or_slide=slide_num,
+                        index=len(images),
+                    ))
+                except Exception:
+                    continue
+                if len(images) >= MAX_IMAGES:
+                    break
+            if len(images) >= MAX_IMAGES:
+                break
+    except Exception:
+        pass
+
+    return images

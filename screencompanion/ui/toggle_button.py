@@ -7,7 +7,7 @@ from pathlib import Path
 import customtkinter as ctk
 from PIL import Image
 
-from docwizard.ui.theme import get_colors, get_font
+from screencompanion.ui.theme import get_colors, get_font
 
 
 def _get_icon_path() -> str:

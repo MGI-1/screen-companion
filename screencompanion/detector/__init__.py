@@ -3,7 +3,7 @@
 import sys
 
 if sys.platform == "darwin":
-    from docwizard.detector.macos import MacOSDetector as Detector
+    from screencompanion.detector.macos import MacOSDetector as Detector
 elif sys.platform == "win32":
     from docwizard.detector.windows import WindowsDetector as Detector
 else:

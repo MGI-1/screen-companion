@@ -48,18 +48,36 @@ WINDOW_HEIGHT = 520
 TOGGLE_SIZE = 50
 
 # ── Validator prompts ──────────────────────────────────────────────
-VALIDATOR_SYSTEM_PROMPT = (
-    "You are a response completeness checker. "
-    "Given a user question and an AI response, determine if the response is "
-    "complete and not cut off mid-sentence, mid-list, or mid-thought. "
-    "Reply ONLY with valid JSON: "
-    '{"complete": true, "reason": "brief explanation"}'
+CODE_GEN_SYSTEM_PROMPT = (
+    "You are a Python/pandas data analyst. "
+    "Given a pandas DataFrame `df` and a user question, write Python code to answer it precisely. "
+    "Rules:\n"
+    "- `df` and `pd` (pandas) are pre-loaded — do not import anything\n"
+    "- Store the final human-readable answer as a string in a variable called `result`\n"
+    "- Filter and look up data exactly as asked — never guess or infer category/field values\n"
+    "- If the result is a list or table, format it as a readable string\n"
+    "- Return ONLY the Python code, no explanation or markdown"
 )
 
-VALIDATOR_USER_TEMPLATE = (
-    "User question: {question}\n\n"
-    "AI response to validate:\n{response}\n\n"
-    "Is this response complete? Reply with JSON only."
+CODE_GEN_USER_TEMPLATE = (
+    "DataFrame columns and types:\n{schema}\n\n"
+    "Sample rows (first 3):\n{sample}\n\n"
+    "Question: {question}\n\n"
+    "Write Python code to answer this. Store the answer as a string in `result`."
+)
+
+RECONCILE_SYSTEM_PROMPT = (
+    "You are reviewing your own answer alongside independent answers from other models. "
+    "Check every item in every answer strictly against the source document. "
+    "Correct any factual errors and return only the final accurate answer — no explanation."
+)
+
+RECONCILE_USER_TEMPLATE = (
+    "Source document:\n<document>\n{document}\n</document>\n\n"
+    "Question: {question}\n\n"
+    "Your initial answer:\n{primary}\n\n"
+    "Independent answers from other models:\n{answers}\n\n"
+    "Cross-check all answers against the document. Fix any errors and return the final accurate answer only."
 )
 
 # ── LLM system prompt ─────────────────────────────────────────────
