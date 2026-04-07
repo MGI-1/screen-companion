@@ -10,7 +10,7 @@ setup(
     python_requires=">=3.9",
     entry_points={
         "console_scripts": [
-            "documentwizard=docwizard.app:main",
+            "screencompanion=screencompanion.app:main",
         ],
     },
 )

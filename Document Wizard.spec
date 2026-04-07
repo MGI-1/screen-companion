@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/customtkinter', 'customtkinter'), ('/Users/sujalsinha/Document Wizard/assets/icon.png', 'assets')]
+datas = [('/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/customtkinter', 'customtkinter')]
 binaries = []
 hiddenimports = ['customtkinter', 'pystray', 'PIL', 'PIL._tkinter_finder', 'pdfplumber', 'pdfminer', 'pdfminer.high_level', 'docx', 'openpyxl', 'pptx', 'anthropic', 'openai', 'google.generativeai', 'google.ai.generativelanguage', 'tkinter', 'tkinter.filedialog']
 tmp_ret = collect_all('customtkinter')
@@ -30,7 +30,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Screen Companion',
+    name='Document Wizard',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -50,11 +50,11 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Screen Companion',
+    name='Document Wizard',
 )
 app = BUNDLE(
     coll,
-    name='Screen Companion.app',
+    name='Document Wizard.app',
     icon='/Users/sujalsinha/Document Wizard/assets/icon.icns',
-    bundle_identifier='com.screencompanion.app',
+    bundle_identifier='com.documentwizard.app',
 )

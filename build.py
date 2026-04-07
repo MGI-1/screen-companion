@@ -108,7 +108,7 @@ def build():
         ])
 
     # Entry point
-    args.append(os.path.join(ROOT, "docwizard", "__main__.py"))
+    args.append(os.path.join(ROOT, "screencompanion", "__main__.py"))
 
     print("\nBuilding Document Wizard...")
     print(f"Command: {' '.join(args)}\n")
