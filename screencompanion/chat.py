@@ -368,3 +368,90 @@ class DocumentChat:
                 continue
 
         return None
+
+    @staticmethod
+    def parse_math_instructions(response: str) -> Optional[dict]:
+        """Extract a math calculation instruction from LLM response.
+
+        Looks for a fenced JSON block with {"action": "calculate", "function": ..., "args": {...}}.
+        Returns the dict, or None if not found.
+        """
+        pattern = r"```json\s*\n?(.*?)\n?\s*```"
+        matches = re.findall(pattern, response, re.DOTALL)
+
+        for match in matches:
+            try:
+                data = json.loads(match)
+                if isinstance(data, dict) and data.get("action") == "calculate":
+                    fn = data.get("function")
+                    args = data.get("args", {})
+                    if fn:
+                        return {"function": fn, "args": args}
+            except json.JSONDecodeError:
+                continue
+
+        return None
+
+    @staticmethod
+    def execute_math(function: str, args: dict) -> dict:
+        """Execute a deterministic math calculation. Returns the provenance envelope."""
+        from screencompanion import math_tools
+
+        # Map short names used in the system prompt to actual function names
+        fn_map = {
+            "add": math_tools.decimal_add,
+            "subtract": math_tools.decimal_subtract,
+            "multiply": math_tools.decimal_multiply,
+            "divide": math_tools.decimal_divide,
+            "sum_values": math_tools.decimal_sum,
+            "average": math_tools.decimal_average,
+            "weighted_average": math_tools.decimal_weighted_average,
+            "round": math_tools.decimal_round,
+            "percentage": math_tools.decimal_percentage,
+            "percentage_change": math_tools.decimal_percentage_change,
+            "variance": math_tools.decimal_variance,
+            "compound_growth": math_tools.decimal_compound_growth,
+            "margin": math_tools.decimal_margin,
+            "roi": math_tools.decimal_roi,
+            "npv": math_tools.decimal_npv,
+            "irr": math_tools.decimal_irr,
+            "payback_period": math_tools.decimal_payback_period,
+            "cagr": math_tools.decimal_cagr,
+            "current_ratio": math_tools.decimal_current_ratio,
+            "quick_ratio": math_tools.decimal_quick_ratio,
+            "debt_to_equity": math_tools.decimal_debt_to_equity,
+            "working_capital": math_tools.decimal_working_capital,
+            "dso": math_tools.decimal_dso,
+            "ebitda": math_tools.decimal_ebitda,
+            "gross_margin": math_tools.decimal_gross_margin,
+            "operating_margin": math_tools.decimal_operating_margin,
+            "roe": math_tools.decimal_roe,
+            "roa": math_tools.decimal_roa,
+            "fx_convert": math_tools.decimal_fx_convert,
+            "rank": math_tools.decimal_rank,
+            "threshold_check": math_tools.decimal_threshold_check,
+        }
+
+        fn = fn_map.get(function)
+        if fn is None:
+            raise ValueError(f"Unknown math function: {function}")
+
+        # Convert integer args from JSON (which parses them as int) to proper types
+        import inspect
+        sig = inspect.signature(fn)
+        coerced = {}
+        for param_name, param in sig.parameters.items():
+            if param_name in args:
+                val = args[param_name]
+                if param.annotation == int and isinstance(val, str):
+                    coerced[param_name] = int(val)
+                else:
+                    coerced[param_name] = val
+            elif param.default is not inspect.Parameter.empty:
+                pass  # use default
+        # Pass any extra args not in signature (handled by the function)
+        for k, v in args.items():
+            if k not in coerced:
+                coerced[k] = v
+
+        return fn(**coerced)

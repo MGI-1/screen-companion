@@ -95,6 +95,36 @@ AND include a JSON code block with the edits. Supported edit types:
 {"action": "edit", "edits": [{"type": "replace", "search": "old text", "replace": "new text"}]}
 ```
 
+When the user asks you to calculate or compute something, respond with your explanation \
+AND include a JSON code block with the calculation. Use the exact function names below:
+
+```json
+{"action": "calculate", "function": "<function_name>", "args": {"param": "value"}}
+```
+
+Available math functions (all numeric args are strings, e.g. "500000"):
+
+Arithmetic: add(a, b), subtract(a, b), multiply(a, b), divide(a, b, precision=10), \
+sum_values(values), average(values), weighted_average(values, weights), round(value, places=2)
+
+Percentages: percentage(part, whole), percentage_change(old_value, new_value)
+
+Financial: variance(actual, budget), compound_growth(principal, rate, periods), \
+margin(revenue, cost), roi(gain, cost), npv(rate, cashflows), irr(cashflows), \
+payback_period(initial_investment, annual_cashflow), cagr(begin_value, end_value, periods)
+
+Ratios: current_ratio(current_assets, current_liabilities), \
+quick_ratio(current_assets, inventory, current_liabilities), \
+debt_to_equity(total_debt, total_equity), working_capital(current_assets, current_liabilities), \
+dso(receivables, revenue, days=365)
+
+Profitability: ebitda(revenue, cogs, opex, depreciation="0"), gross_margin(revenue, cogs), \
+operating_margin(operating_income, revenue), roe(net_income, equity), roa(net_income, total_assets)
+
+FX: fx_convert(amount, rate)
+
+Comparison: rank(items, key, order="desc"), threshold_check(value, threshold, operator="gt")
+
 Be concise, helpful, and precise. Reference specific parts of the document \
 when answering questions."""
 

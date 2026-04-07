@@ -361,6 +361,9 @@ class ScreenCompanionApp:
         # Check for edit instructions
         edits = DocumentChat.parse_edit_instructions(response)
 
+        # Check for math calculation instructions
+        math_instr = DocumentChat.parse_math_instructions(response)
+
         # Show the text response (strip the JSON block for cleaner display)
         import re
         display_text = re.sub(
@@ -368,6 +371,20 @@ class ScreenCompanionApp:
         ).strip()
         if display_text:
             self._chat_widget.add_bot_message(display_text)
+
+        # Execute and display math calculation if detected
+        if math_instr:
+            try:
+                result = DocumentChat.execute_math(
+                    math_instr["function"], math_instr["args"]
+                )
+                unit = result.get("unit", "")
+                result_val = result["result"]
+                formula = result["formula"]
+                display = f"Result: {result_val}{unit}\nFormula: {formula}"
+                self._chat_widget.add_system_message(display)
+            except Exception as e:
+                self._chat_widget.add_system_message(f"Calculation error: {e}")
 
         # Show edit proposal if detected
         if edits and self._current_doc_path:
