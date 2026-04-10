@@ -8,6 +8,7 @@ from screencompanion.config import (
     SYSTEM_PROMPT, LLM_PROVIDERS, load_user_config,
     RECONCILE_SYSTEM_PROMPT, RECONCILE_USER_TEMPLATE,
     CODE_GEN_SYSTEM_PROMPT, CODE_GEN_USER_TEMPLATE,
+    get_output_tokens, is_reasoning_model,
 )
 
 
@@ -27,12 +28,15 @@ class DocumentChat:
         self.document_images: list = []   # list[ImageData]
         self._images_pending: bool = False
         self._dataframe = None  # pandas DataFrame for CSV/XLSX files
+        self._output_tokens: int = 4_096
+        self._last_math_result: Optional[dict] = None  # consumed by app.py for sidebar
 
     def configure(self, provider: str, api_key: str, model: str = ""):
         """Set the LLM provider and API key."""
         self._provider = provider
         self._api_key = api_key
         self._model = model or LLM_PROVIDERS[provider]["default_model"]
+        self._output_tokens = get_output_tokens(self._provider, self._model)
         self._client = None  # Reset client to force re-init
 
     def configure_validator(self, provider: str, api_key: str):
@@ -64,6 +68,9 @@ class DocumentChat:
         if not self.is_configured():
             return "Please configure your LLM provider in settings first."
 
+        # Reset prior math result so app.py never re-renders a stale sidebar
+        self._last_math_result = None
+
         self.messages.append({"role": "user", "content": user_message})
 
         # For structured data (CSV/XLSX), execute pandas code for precise answers
@@ -80,14 +87,7 @@ class DocumentChat:
             self._images_pending = False  # clear before call; restore on error
 
         try:
-            if self._provider == "anthropic":
-                response = self._ask_anthropic(inject_images)
-            elif self._provider == "openai":
-                response = self._ask_openai(inject_images)
-            elif self._provider == "google":
-                response = self._ask_google(inject_images)
-            else:
-                response = f"Unknown provider: {self._provider}"
+            response = self._dispatch_provider(inject_images)
         except Exception as e:
             error_msg = str(e)
             self.messages.pop()
@@ -97,6 +97,32 @@ class DocumentChat:
 
         if inject_images:
             self.document_images = []  # free memory after successful send
+
+        # ── Math feedback loop ────────────────────────────────────────
+        # If the model emitted a calculation block, execute it deterministically
+        # and re-ask the model with the result injected so its prose answer
+        # actually reflects the computed numbers. Capped at one round.
+        math_instr = self.parse_math_instructions(response)
+        if math_instr:
+            try:
+                envelope = self.execute_math(
+                    math_instr["function"], math_instr["args"]
+                )
+                self._last_math_result = envelope
+                response = self._continue_with_math_result(
+                    response, math_instr["function"], envelope
+                )
+            except Exception as exc:
+                # Math failure shouldn't block the user — surface the error
+                # in the sidebar via _last_math_result and keep original prose.
+                self._last_math_result = {
+                    "result": "ERROR",
+                    "formula": f"{math_instr.get('function', '?')} failed",
+                    "error": str(exc),
+                }
+
+        # Strip any residual JSON calc block so app.py doesn't double-execute
+        response = self._strip_calc_block(response)
 
         # Cross-check with 3 independent validator models and reconcile
         if self.has_validator():
@@ -109,6 +135,65 @@ class DocumentChat:
 
         self.messages.append({"role": "assistant", "content": response})
         return response
+
+    def _dispatch_provider(self, inject_images: bool) -> str:
+        """Route to the configured provider's _ask_* method."""
+        if self._provider == "anthropic":
+            return self._ask_anthropic(inject_images)
+        if self._provider == "openai":
+            return self._ask_openai(inject_images)
+        if self._provider == "google":
+            return self._ask_google(inject_images)
+        return f"Unknown provider: {self._provider}"
+
+    def _continue_with_math_result(
+        self, first_response: str, function: str, envelope: dict
+    ) -> str:
+        """
+        Feed a deterministic math result back to the LLM for one more round
+        so it can write a final answer using the computed value.
+
+        Synthetic feedback messages are popped before returning so they never
+        leak into long-term conversation history.
+        """
+        # Append the model's first response to history so it sees its own thinking
+        self.messages.append({"role": "assistant", "content": first_response})
+
+        feedback_payload = json.dumps(envelope, indent=2, default=str)
+        feedback_msg = (
+            f"Tool result for {function}:\n{feedback_payload}\n\n"
+            "Use this exact result to write the final answer for the user. "
+            "If the envelope contains `filtered_items`, `top_items`, or "
+            "`ranked_items`, list ONLY those items — do not add or remove any. "
+            "Do not emit another calculation block."
+        )
+        self.messages.append({"role": "user", "content": feedback_msg})
+
+        try:
+            final_response = self._dispatch_provider(inject_images=False)
+        except Exception:
+            # Roll back synthetic turns and fall back to the original response
+            self.messages.pop()  # feedback user msg
+            self.messages.pop()  # first assistant msg
+            return first_response
+
+        # Drop synthetic turns; the caller will append the final response itself
+        self.messages.pop()  # feedback user msg
+        self.messages.pop()  # first assistant msg
+        return final_response
+
+    @staticmethod
+    def _strip_calc_block(text: str) -> str:
+        """Remove any ```json {"action":"calculate", ...} ``` block from text."""
+        pattern = r"```json\s*\n?\{[^`]*\"action\"\s*:\s*\"calculate\"[^`]*\}\s*\n?```"
+        cleaned = re.sub(pattern, "", text, flags=re.DOTALL).strip()
+        return cleaned or text
+
+    def consume_last_math_result(self) -> Optional[dict]:
+        """Pop and return the math envelope from the most recent ask() call."""
+        envelope = self._last_math_result
+        self._last_math_result = None
+        return envelope
 
     def _ask_with_code(self, question: str) -> str:
         """Generate pandas code via LLM, execute it, and return the result."""
@@ -202,12 +287,18 @@ class DocumentChat:
         messages: list[dict],
     ) -> str:
         """Make a single stateless API call to any provider."""
+        # Validator/reconcile calls don't need the model's full output window
+        # but the old 1024 cap was too small — answers were getting truncated.
+        # Use the model's full output ceiling, capped at 8192 to keep one-shot
+        # validation cheap.
+        one_shot_tokens = min(get_output_tokens(provider, model), 8192)
+
         if provider == "anthropic":
             import anthropic
             client = anthropic.Anthropic(api_key=api_key)
             resp = client.messages.create(
                 model=model,
-                max_tokens=1024,
+                max_tokens=one_shot_tokens,
                 system=system,
                 messages=messages,
             )
@@ -217,10 +308,15 @@ class DocumentChat:
             import openai
             client = openai.OpenAI(api_key=api_key)
             full_messages = [{"role": "system", "content": system}, *messages]
+            token_kwargs: dict = {}
+            if is_reasoning_model(provider, model):
+                token_kwargs["max_completion_tokens"] = one_shot_tokens
+            else:
+                token_kwargs["max_tokens"] = one_shot_tokens
             resp = client.chat.completions.create(
                 model=model,
                 messages=full_messages,
-                max_tokens=1024,
+                **token_kwargs,
             )
             return resp.choices[0].message.content
 
@@ -230,6 +326,7 @@ class DocumentChat:
             gmodel = genai.GenerativeModel(
                 model_name=model,
                 system_instruction=system,
+                generation_config={"max_output_tokens": one_shot_tokens},
             )
             history = []
             for msg in messages[:-1]:
@@ -277,7 +374,7 @@ class DocumentChat:
 
         response = self._client.messages.create(
             model=self._model,
-            max_tokens=8192,
+            max_tokens=self._output_tokens,
             system=self._build_system_prompt(),
             messages=messages,
         )
@@ -307,10 +404,18 @@ class DocumentChat:
             content_parts.append({"type": "text", "text": messages[-1]["content"]})
             messages[-1] = {"role": "user", "content": content_parts}
 
+        # Reasoning models (o3-mini, etc.) require max_completion_tokens and
+        # reject max_tokens. Detect via the per-model spec in config.
+        token_kwargs: dict = {}
+        if is_reasoning_model(self._provider, self._model):
+            token_kwargs["max_completion_tokens"] = self._output_tokens
+        else:
+            token_kwargs["max_tokens"] = self._output_tokens
+
         response = self._client.chat.completions.create(
             model=self._model,
             messages=messages,
-            max_tokens=8192,
+            **token_kwargs,
         )
         return response.choices[0].message.content
 
@@ -323,6 +428,7 @@ class DocumentChat:
             self._client = genai.GenerativeModel(
                 model_name=self._model,
                 system_instruction=self._build_system_prompt(),
+                generation_config={"max_output_tokens": self._output_tokens},
             )
 
         # Convert message history to Gemini format
@@ -430,6 +536,28 @@ class DocumentChat:
             "fx_convert": math_tools.decimal_fx_convert,
             "rank": math_tools.decimal_rank,
             "threshold_check": math_tools.decimal_threshold_check,
+            "filter_by_threshold": math_tools.decimal_filter_by_threshold,
+            "top_n": math_tools.decimal_top_n,
+            # Extended specialist tools
+            "dpo": math_tools.decimal_dpo,
+            "dio": math_tools.decimal_dio,
+            "cash_conversion_cycle": math_tools.decimal_cash_conversion_cycle,
+            "inventory_turnover": math_tools.decimal_inventory_turnover,
+            "interest_coverage": math_tools.decimal_interest_coverage,
+            "debt_service_coverage": math_tools.decimal_debt_service_coverage,
+            "contribution_margin": math_tools.decimal_contribution_margin,
+            "break_even": math_tools.decimal_break_even,
+            "wacc": math_tools.decimal_wacc,
+            "xnpv": math_tools.decimal_xnpv,
+            "xirr": math_tools.decimal_xirr,
+            "moving_average": math_tools.decimal_moving_average,
+            "exponential_smoothing": math_tools.decimal_exponential_smoothing,
+            "z_score": math_tools.decimal_z_score,
+            "percentile": math_tools.decimal_percentile,
+            "correlation": math_tools.decimal_correlation,
+            "volume_price_mix": math_tools.decimal_volume_price_mix,
+            "value_at_risk": math_tools.decimal_value_at_risk,
+            "loan_payment": math_tools.decimal_loan_payment,
         }
 
         fn = fn_map.get(function)

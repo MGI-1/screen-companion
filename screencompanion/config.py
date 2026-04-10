@@ -39,8 +39,16 @@ SUPPORTED_EDIT_FORMATS = {".txt", ".docx", ".csv", ".xlsx", ".md", ".html",
 POLL_INTERVAL_SECONDS = 2
 
 # ── Content limits ─────────────────────────────────────────────────
+# MAX_CONTENT_CHARS is the fallback cap when no provider/model context is
+# available. The active model's true input window is consulted at read-time
+# via get_max_input_chars(). See model_specs in LLM_PROVIDERS below.
 MAX_CONTENT_CHARS = 200_000
 MAX_FILE_SIZE_MB = 1024
+
+# Rough char-to-token conversion. Real tokenization varies (English ~3.5–4
+# chars/token across Claude/GPT/Gemini); the reserve_tokens slack absorbs
+# the error.
+CHARS_PER_TOKEN = 4
 
 # ── Window dimensions ─────────────────────────────────────────────
 WINDOW_WIDTH = 370
@@ -102,6 +110,14 @@ AND include a JSON code block with the calculation. Use the exact function names
 {"action": "calculate", "function": "<function_name>", "args": {"param": "value"}}
 ```
 
+CRITICAL RULE for list questions: Whenever the user asks you to filter, select, rank, \
+or pick the top items from a list (e.g. "items above $X", "top 5 by revenue", "every \
+row where amount < 100"), you MUST emit a JSON calculation block using one of the \
+Comparison & Selection functions and trust the returned `filtered_items` / `top_items` \
+/ `ranked_items` array. Never produce the filtered list yourself from the document — \
+the deterministic tool result will be fed back to you in a follow-up turn so you can \
+write the final answer.
+
 Available math functions (all numeric args are strings, e.g. "500000"):
 
 Arithmetic: add(a, b), subtract(a, b), multiply(a, b), divide(a, b, precision=10), \
@@ -123,12 +139,43 @@ operating_margin(operating_income, revenue), roe(net_income, equity), roa(net_in
 
 FX: fx_convert(amount, rate)
 
-Comparison: rank(items, key, order="desc"), threshold_check(value, threshold, operator="gt")
+Comparison & Selection: rank(items, key, order="desc"), \
+threshold_check(value, threshold, operator="gt"), \
+filter_by_threshold(items, key, threshold, operator="gt"), \
+top_n(items, key, n, order="desc")
+
+Working Capital Cycle: dpo(payables, cogs, days=365), dio(inventory, cogs, days=365), \
+cash_conversion_cycle(dso, dio, dpo), inventory_turnover(cogs, average_inventory)
+
+Solvency & Coverage: interest_coverage(ebitda, interest_expense), \
+debt_service_coverage(operating_income, debt_service)
+
+Cost Analysis: contribution_margin(revenue, variable_costs), \
+break_even(fixed_costs, price_per_unit, variable_cost_per_unit)
+
+Advanced Valuation: wacc(equity, debt, cost_of_equity, cost_of_debt, tax_rate), \
+xnpv(rate, cashflows, dates), xirr(cashflows, dates)
+
+Time Series & Forecasting: moving_average(values, window=3), \
+exponential_smoothing(values, alpha="0.3"), z_score(value, mean, std_dev), \
+percentile(values, percentile), correlation(series_a, series_b)
+
+Variance Decomposition: volume_price_mix(actual_volume, actual_price, budget_volume, budget_price)
+
+Risk: value_at_risk(portfolio_value, volatility, confidence="0.95", days=1)
+
+Loans: loan_payment(principal, annual_rate, periods)
 
 Be concise, helpful, and precise. Reference specific parts of the document \
 when answering questions."""
 
 # ── LLM provider configs ──────────────────────────────────────────
+# model_specs maps each model to:
+#   input_tokens  — full context window
+#   output_tokens — max generation per response
+#   reasoning     — True for OpenAI reasoning models that require
+#                   max_completion_tokens instead of max_tokens
+# Verify these against provider docs whenever you add or change a model.
 LLM_PROVIDERS = {
     "anthropic": {
         "name": "Anthropic (Claude)",
@@ -139,6 +186,11 @@ LLM_PROVIDERS = {
         ],
         "default_model": "claude-sonnet-4-20250514",
         "env_key": "ANTHROPIC_API_KEY",
+        "model_specs": {
+            "claude-sonnet-4-20250514":  {"input_tokens": 200_000, "output_tokens": 64_000},
+            "claude-haiku-4-5-20251001": {"input_tokens": 200_000, "output_tokens": 64_000},
+            "claude-opus-4-20250514":    {"input_tokens": 200_000, "output_tokens": 32_000},
+        },
     },
     "openai": {
         "name": "OpenAI (GPT)",
@@ -150,6 +202,12 @@ LLM_PROVIDERS = {
         ],
         "default_model": "gpt-4o",
         "env_key": "OPENAI_API_KEY",
+        "model_specs": {
+            "gpt-4o":      {"input_tokens": 128_000, "output_tokens": 16_384},
+            "gpt-4o-mini": {"input_tokens": 128_000, "output_tokens": 16_384},
+            "gpt-4-turbo": {"input_tokens": 128_000, "output_tokens": 4_096},
+            "o3-mini":     {"input_tokens": 200_000, "output_tokens": 100_000, "reasoning": True},
+        },
     },
     "google": {
         "name": "Google (Gemini)",
@@ -160,8 +218,50 @@ LLM_PROVIDERS = {
         ],
         "default_model": "gemini-2.0-flash",
         "env_key": "GOOGLE_API_KEY",
+        "model_specs": {
+            "gemini-2.0-flash":      {"input_tokens": 1_048_576, "output_tokens": 8_192},
+            "gemini-2.0-flash-lite": {"input_tokens": 1_048_576, "output_tokens": 8_192},
+            "gemini-1.5-pro":        {"input_tokens": 2_097_152, "output_tokens": 8_192},
+        },
     },
 }
+
+
+_DEFAULT_MODEL_SPEC = {"input_tokens": 100_000, "output_tokens": 4_096}
+
+
+def get_model_spec(provider: str, model: str) -> dict:
+    """Return the input/output token spec for a provider+model, with a safe fallback."""
+    return (
+        LLM_PROVIDERS.get(provider, {})
+        .get("model_specs", {})
+        .get(model, _DEFAULT_MODEL_SPEC)
+    )
+
+
+def get_max_input_chars(provider: str, model: str, reserve_tokens: int = 8_000) -> int:
+    """
+    Convert a model's input window into a character cap for document truncation.
+
+    Reserves room for the system prompt, conversation history, and the model's
+    own response (output_tokens) so the document fits comfortably inside the
+    real context window.
+    """
+    spec = get_model_spec(provider, model)
+    usable_tokens = spec["input_tokens"] - reserve_tokens - spec["output_tokens"]
+    if usable_tokens < 10_000:
+        usable_tokens = 10_000
+    return usable_tokens * CHARS_PER_TOKEN
+
+
+def get_output_tokens(provider: str, model: str) -> int:
+    """Return the max output tokens for a provider+model."""
+    return get_model_spec(provider, model)["output_tokens"]
+
+
+def is_reasoning_model(provider: str, model: str) -> bool:
+    """True if the model uses max_completion_tokens instead of max_tokens (e.g. o3-mini)."""
+    return bool(get_model_spec(provider, model).get("reasoning"))
 
 # ── macOS AppleScript map ──────────────────────────────────────────
 APP_SCRIPT_MAP = {

@@ -300,6 +300,83 @@ def decimal_threshold_check(value: str, threshold: str, operator: str = "gt") ->
     )
 
 
+def decimal_filter_by_threshold(items: list[dict], key: str, threshold: str,
+                                operator: str = "gt") -> dict:
+    """
+    Return only items whose `key` field meets the threshold.
+    items: [{"name": "A", "amount": "500"}, ...]
+    operator: gt, gte, lt, lte, eq
+    """
+    if not items:
+        return _envelope(
+            "0",
+            f"filter by {key} {operator} {threshold}",
+            {"key": key, "threshold": threshold, "operator": operator},
+            filtered_items=[],
+            filtered_count=0,
+            input_count=0,
+        )
+
+    d_thresh = _to_decimal(threshold)
+    ops = {
+        "gt": lambda v: v > d_thresh,
+        "gte": lambda v: v >= d_thresh,
+        "lt": lambda v: v < d_thresh,
+        "lte": lambda v: v <= d_thresh,
+        "eq": lambda v: v == d_thresh,
+    }
+    if operator not in ops:
+        raise ValueError(f"Unknown operator: {operator}. Use: gt, gte, lt, lte, eq")
+    op_fn = ops[operator]
+
+    filtered = []
+    skipped = 0
+    for item in items:
+        try:
+            val = _to_decimal(item.get(key, "0"))
+        except (ValueError, InvalidOperation):
+            skipped += 1
+            continue
+        if op_fn(val):
+            filtered.append({**item, "_value": str(val)})
+
+    return _envelope(
+        str(len(filtered)),
+        f"filter {len(items)} items where {key} {operator} {threshold}",
+        {
+            "key": key,
+            "threshold": str(d_thresh),
+            "operator": operator,
+            "input_count": len(items),
+            "skipped_non_numeric": skipped,
+        },
+        filtered_items=filtered,
+        filtered_count=len(filtered),
+    )
+
+
+def decimal_top_n(items: list[dict], key: str, n: int, order: str = "desc") -> dict:
+    """
+    Return the top-N items by a numeric key (sort + slice in one call).
+    items: [{"name": "A", "revenue": "500"}, ...]
+    order: "desc" (largest first) or "asc" (smallest first)
+    """
+    n_int = int(n)
+    ranked = decimal_rank(items, key, order)
+    top = ranked.get("ranked_items", [])[:n_int]
+    return _envelope(
+        str(len(top)),
+        f"top {n_int} of {len(items)} by '{key}' {order}",
+        {
+            "key": key,
+            "order": order,
+            "n": n_int,
+            "input_count": len(items),
+        },
+        top_items=top,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Utility
 # ---------------------------------------------------------------------------
@@ -579,4 +656,474 @@ def decimal_fx_convert(amount: str, rate: str) -> dict:
         result,
         f"{d_amount} × {d_rate}",
         {"amount": str(d_amount), "rate": str(d_rate)},
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXTENDED SPECIALIST TOOLS — Time series, working capital, advanced valuation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ---------------------------------------------------------------------------
+# Working capital cycle
+# ---------------------------------------------------------------------------
+
+def decimal_dpo(payables: str, cogs: str, days: int = 365) -> dict:
+    """Days Payable Outstanding = (Payables / COGS) × Days."""
+    pay = _to_decimal(payables)
+    d_cogs = _to_decimal(cogs)
+    if d_cogs == 0:
+        raise ValueError("COGS cannot be zero")
+    result = _quantize(pay / d_cogs * Decimal(str(days)), 1)
+    return _envelope(
+        result,
+        f"({pay} / {d_cogs}) × {days}",
+        {"payables": str(pay), "cogs": str(d_cogs), "days": days},
+        unit="days",
+    )
+
+
+def decimal_dio(inventory: str, cogs: str, days: int = 365) -> dict:
+    """Days Inventory Outstanding = (Inventory / COGS) × Days."""
+    inv = _to_decimal(inventory)
+    d_cogs = _to_decimal(cogs)
+    if d_cogs == 0:
+        raise ValueError("COGS cannot be zero")
+    result = _quantize(inv / d_cogs * Decimal(str(days)), 1)
+    return _envelope(
+        result,
+        f"({inv} / {d_cogs}) × {days}",
+        {"inventory": str(inv), "cogs": str(d_cogs), "days": days},
+        unit="days",
+    )
+
+
+def decimal_cash_conversion_cycle(dso: str, dio: str, dpo: str) -> dict:
+    """Cash Conversion Cycle = DSO + DIO - DPO."""
+    d_dso = _to_decimal(dso)
+    d_dio = _to_decimal(dio)
+    d_dpo = _to_decimal(dpo)
+    result = d_dso + d_dio - d_dpo
+    return _envelope(
+        _quantize(result, 1),
+        f"{d_dso} + {d_dio} - {d_dpo}",
+        {"dso": str(d_dso), "dio": str(d_dio), "dpo": str(d_dpo)},
+        unit="days",
+        favorable="True" if result < Decimal("60") else "False",
+    )
+
+
+def decimal_inventory_turnover(cogs: str, average_inventory: str) -> dict:
+    """Inventory Turnover = COGS / Average Inventory."""
+    d_cogs = _to_decimal(cogs)
+    inv = _to_decimal(average_inventory)
+    if inv == 0:
+        raise ValueError("Average inventory cannot be zero")
+    result = _quantize(d_cogs / inv, 2)
+    return _envelope(
+        result,
+        f"{d_cogs} / {inv}",
+        {"cogs": str(d_cogs), "average_inventory": str(inv)},
+        unit="x per year",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Solvency & coverage
+# ---------------------------------------------------------------------------
+
+def decimal_interest_coverage(ebitda: str, interest_expense: str) -> dict:
+    """Interest Coverage Ratio = EBITDA / Interest Expense."""
+    e = _to_decimal(ebitda)
+    interest = _to_decimal(interest_expense)
+    if interest == 0:
+        raise ValueError("Interest expense cannot be zero")
+    result = _quantize(e / interest, 2)
+    return _envelope(
+        result,
+        f"{e} / {interest}",
+        {"ebitda": str(e), "interest_expense": str(interest)},
+        unit="x",
+        healthy="True" if result >= Decimal("3.0") else "False",
+    )
+
+
+def decimal_debt_service_coverage(operating_income: str, debt_service: str) -> dict:
+    """Debt Service Coverage Ratio = Operating Income / Total Debt Service."""
+    oi = _to_decimal(operating_income)
+    ds = _to_decimal(debt_service)
+    if ds == 0:
+        raise ValueError("Debt service cannot be zero")
+    result = _quantize(oi / ds, 2)
+    return _envelope(
+        result,
+        f"{oi} / {ds}",
+        {"operating_income": str(oi), "debt_service": str(ds)},
+        unit="x",
+        healthy="True" if result >= Decimal("1.25") else "False",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cost analysis
+# ---------------------------------------------------------------------------
+
+def decimal_contribution_margin(revenue: str, variable_costs: str) -> dict:
+    """Contribution Margin = Revenue - Variable Costs (and as %)."""
+    rev = _to_decimal(revenue)
+    vc = _to_decimal(variable_costs)
+    if rev == 0:
+        raise ValueError("Revenue cannot be zero")
+    cm = rev - vc
+    cm_pct = _quantize(cm / rev * Decimal("100"))
+    return _envelope(
+        _quantize(cm),
+        f"{rev} - {vc}",
+        {"revenue": str(rev), "variable_costs": str(vc)},
+        contribution_margin_pct=str(cm_pct),
+        unit="$",
+    )
+
+
+def decimal_break_even(fixed_costs: str, price_per_unit: str, variable_cost_per_unit: str) -> dict:
+    """Break-even units = Fixed Costs / (Price - Variable Cost per unit)."""
+    fc = _to_decimal(fixed_costs)
+    price = _to_decimal(price_per_unit)
+    vc = _to_decimal(variable_cost_per_unit)
+    cm_per_unit = price - vc
+    if cm_per_unit <= 0:
+        raise ValueError("Contribution margin per unit must be positive")
+    units = _quantize(fc / cm_per_unit, 0)
+    revenue_at_break_even = _quantize(units * price)
+    return _envelope(
+        units,
+        f"{fc} / ({price} - {vc})",
+        {"fixed_costs": str(fc), "price_per_unit": str(price), "variable_cost_per_unit": str(vc)},
+        unit="units",
+        revenue_at_break_even=str(revenue_at_break_even),
+        contribution_per_unit=str(cm_per_unit),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Advanced valuation
+# ---------------------------------------------------------------------------
+
+def decimal_wacc(equity: str, debt: str, cost_of_equity: str, cost_of_debt: str, tax_rate: str) -> dict:
+    """Weighted Average Cost of Capital.
+    WACC = (E/V × Re) + (D/V × Rd × (1 - Tc))
+    """
+    e = _to_decimal(equity)
+    d = _to_decimal(debt)
+    re = _to_decimal(cost_of_equity)
+    rd = _to_decimal(cost_of_debt)
+    tc = _to_decimal(tax_rate)
+    v = e + d
+    if v == 0:
+        raise ValueError("Equity + Debt cannot be zero")
+    equity_weight = e / v
+    debt_weight = d / v
+    after_tax_cod = rd * (Decimal("1") - tc)
+    wacc = equity_weight * re + debt_weight * after_tax_cod
+    result = _quantize(wacc * Decimal("100"))
+    return _envelope(
+        result,
+        f"({e}/{v} × {re}) + ({d}/{v} × {rd} × (1 - {tc}))",
+        {
+            "equity": str(e), "debt": str(d), "cost_of_equity": str(re),
+            "cost_of_debt": str(rd), "tax_rate": str(tc),
+        },
+        unit="%",
+        equity_weight=str(_quantize(equity_weight * Decimal("100"))),
+        debt_weight=str(_quantize(debt_weight * Decimal("100"))),
+    )
+
+
+def decimal_xnpv(rate: str, cashflows: list[str], dates: list[str]) -> dict:
+    """NPV with irregular dates: sum(CF_i / (1+r)^((d_i - d_0)/365))."""
+    from datetime import datetime
+    r = _to_decimal(rate)
+    if len(cashflows) != len(dates):
+        raise ValueError("cashflows and dates must have same length")
+    cfs = [_to_decimal(c) for c in cashflows]
+    parsed_dates = [datetime.fromisoformat(d) for d in dates]
+    d0 = parsed_dates[0]
+    total = Decimal("0")
+    details = []
+    for cf, d in zip(cfs, parsed_dates):
+        days = (d - d0).days
+        years = Decimal(days) / Decimal("365")
+        # For fractional exponent, fall back to float
+        factor = Decimal(str(float(Decimal("1") + r) ** float(years)))
+        pv = _quantize(cf / factor) if factor != 0 else Decimal("0")
+        total += pv
+        details.append({"date": d.isoformat(), "cashflow": str(cf), "years": str(_quantize(years, 4)), "pv": str(pv)})
+    return _envelope(
+        _quantize(total),
+        f"sum(CF_i / (1+{r})^((d_i - d_0)/365))",
+        {"rate": str(r), "cashflows": [str(c) for c in cfs], "dates": dates},
+        period_details=details,
+    )
+
+
+def decimal_xirr(cashflows: list[str], dates: list[str], max_iterations: int = 100, tolerance: str = "0.000001") -> dict:
+    """IRR with irregular dates via Newton-Raphson."""
+    from datetime import datetime
+    cfs = [_to_decimal(c) for c in cashflows]
+    parsed_dates = [datetime.fromisoformat(d) for d in dates]
+    d0 = parsed_dates[0]
+    years = [Decimal((d - d0).days) / Decimal("365") for d in parsed_dates]
+    tol = _to_decimal(tolerance)
+    guess = 0.10  # work in float for fractional exponents
+
+    for iteration in range(max_iterations):
+        npv = sum(float(cf) / (1 + guess) ** float(yr) for cf, yr in zip(cfs, years))
+        dnpv = sum(-float(yr) * float(cf) / (1 + guess) ** (float(yr) + 1) for cf, yr in zip(cfs, years))
+        if dnpv == 0:
+            break
+        new_guess = guess - npv / dnpv
+        if abs(new_guess - guess) < float(tol):
+            guess = new_guess
+            break
+        guess = new_guess
+
+    result_pct = _quantize(Decimal(str(guess)) * Decimal("100"))
+    return _envelope(
+        result_pct,
+        f"XIRR with {len(cfs)} irregular cashflows, solved in {min(iteration+1, max_iterations)} iterations",
+        {"cashflows": [str(c) for c in cfs], "dates": dates},
+        unit="%",
+        rate_decimal=str(_quantize(Decimal(str(guess)), 6)),
+        converged=iteration < max_iterations - 1,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Time series & forecasting
+# ---------------------------------------------------------------------------
+
+def decimal_moving_average(values: list[str], window: int = 3) -> dict:
+    """N-period simple moving average."""
+    nums = [_to_decimal(v) for v in values]
+    if window <= 0 or window > len(nums):
+        raise ValueError(f"Window must be between 1 and {len(nums)}")
+    averages = []
+    for i in range(window - 1, len(nums)):
+        window_sum = sum(nums[i - window + 1:i + 1])
+        averages.append(_quantize(window_sum / Decimal(window)))
+    return _envelope(
+        str(averages[-1]) if averages else "0",
+        f"{window}-period simple moving average over {len(nums)} values",
+        {"values": [str(n) for n in nums], "window": window},
+        series=[str(a) for a in averages],
+        latest=str(averages[-1]) if averages else "0",
+    )
+
+
+def decimal_exponential_smoothing(values: list[str], alpha: str = "0.3") -> dict:
+    """Exponential smoothing: S_t = α × X_t + (1-α) × S_{t-1}."""
+    nums = [_to_decimal(v) for v in values]
+    a = _to_decimal(alpha)
+    if not (Decimal("0") < a < Decimal("1")):
+        raise ValueError("Alpha must be between 0 and 1")
+    if not nums:
+        raise ValueError("Values list cannot be empty")
+    smoothed = [nums[0]]
+    for i in range(1, len(nums)):
+        s = a * nums[i] + (Decimal("1") - a) * smoothed[-1]
+        smoothed.append(_quantize(s))
+    forecast_next = _quantize(a * nums[-1] + (Decimal("1") - a) * smoothed[-1])
+    return _envelope(
+        forecast_next,
+        f"S_t = {a} × X_t + (1 - {a}) × S_{{t-1}}, forecast for next period",
+        {"values": [str(n) for n in nums], "alpha": str(a)},
+        smoothed_series=[str(s) for s in smoothed],
+        forecast_next=str(forecast_next),
+    )
+
+
+def decimal_z_score(value: str, mean: str, std_dev: str) -> dict:
+    """Z-score = (value - mean) / std_dev. Used for anomaly detection."""
+    v = _to_decimal(value)
+    m = _to_decimal(mean)
+    sd = _to_decimal(std_dev)
+    if sd == 0:
+        raise ValueError("Standard deviation cannot be zero")
+    z = _quantize((v - m) / sd, 4)
+    abs_z = abs(z)
+    if abs_z > Decimal("3"):
+        severity = "extreme_outlier"
+    elif abs_z > Decimal("2"):
+        severity = "outlier"
+    elif abs_z > Decimal("1"):
+        severity = "moderate"
+    else:
+        severity = "normal"
+    return _envelope(
+        z,
+        f"({v} - {m}) / {sd}",
+        {"value": str(v), "mean": str(m), "std_dev": str(sd)},
+        severity=severity,
+        is_outlier="True" if abs_z > Decimal("2") else "False",
+    )
+
+
+def decimal_percentile(values: list[str], percentile: str) -> dict:
+    """Compute the Nth percentile of a list of values (linear interpolation)."""
+    nums = sorted([_to_decimal(v) for v in values])
+    p = _to_decimal(percentile)
+    if not (Decimal("0") <= p <= Decimal("100")):
+        raise ValueError("Percentile must be between 0 and 100")
+    if not nums:
+        raise ValueError("Values list cannot be empty")
+    if len(nums) == 1:
+        return _envelope(nums[0], f"{p}th percentile of single value", {"values": [str(nums[0])], "percentile": str(p)})
+    # Linear interpolation
+    rank = (p / Decimal("100")) * Decimal(len(nums) - 1)
+    lower_idx = int(rank)
+    upper_idx = min(lower_idx + 1, len(nums) - 1)
+    fraction = rank - Decimal(lower_idx)
+    result = nums[lower_idx] + (nums[upper_idx] - nums[lower_idx]) * fraction
+    return _envelope(
+        _quantize(result),
+        f"{p}th percentile of {len(nums)} sorted values (linear interpolation)",
+        {"values": [str(n) for n in nums], "percentile": str(p)},
+    )
+
+
+def decimal_correlation(series_a: list[str], series_b: list[str]) -> dict:
+    """Pearson correlation coefficient between two series."""
+    a = [_to_decimal(v) for v in series_a]
+    b = [_to_decimal(v) for v in series_b]
+    if len(a) != len(b):
+        raise ValueError("Series must have same length")
+    if len(a) < 2:
+        raise ValueError("Need at least 2 data points")
+    n = Decimal(len(a))
+    mean_a = sum(a) / n
+    mean_b = sum(b) / n
+    cov = sum((x - mean_a) * (y - mean_b) for x, y in zip(a, b))
+    var_a = sum((x - mean_a) ** 2 for x in a)
+    var_b = sum((y - mean_b) ** 2 for y in b)
+    denom = var_a * var_b
+    if denom == 0:
+        raise ValueError("One or both series have zero variance")
+    # sqrt via float fallback (Decimal has no native sqrt that works for this size)
+    import math
+    r = float(cov) / math.sqrt(float(denom))
+    result = _quantize(Decimal(str(r)), 4)
+    if abs(result) > Decimal("0.7"):
+        strength = "strong"
+    elif abs(result) > Decimal("0.4"):
+        strength = "moderate"
+    elif abs(result) > Decimal("0.2"):
+        strength = "weak"
+    else:
+        strength = "negligible"
+    return _envelope(
+        result,
+        f"Pearson r between {len(a)}-point series",
+        {"series_a": [str(x) for x in a], "series_b": [str(x) for x in b]},
+        strength=strength,
+        direction="positive" if result > 0 else "negative" if result < 0 else "none",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Variance decomposition
+# ---------------------------------------------------------------------------
+
+def decimal_volume_price_mix(
+    actual_volume: str, actual_price: str,
+    budget_volume: str, budget_price: str,
+) -> dict:
+    """Decompose revenue variance into volume effect, price effect, and mix.
+    Volume effect = (Actual Vol - Budget Vol) × Budget Price
+    Price effect = (Actual Price - Budget Price) × Actual Volume
+    Total variance = Volume + Price
+    """
+    av = _to_decimal(actual_volume)
+    ap = _to_decimal(actual_price)
+    bv = _to_decimal(budget_volume)
+    bp = _to_decimal(budget_price)
+    actual_revenue = av * ap
+    budget_revenue = bv * bp
+    total_variance = actual_revenue - budget_revenue
+    volume_effect = _quantize((av - bv) * bp)
+    price_effect = _quantize((ap - bp) * av)
+    return _envelope(
+        _quantize(total_variance),
+        "vol_effect + price_effect",
+        {
+            "actual_volume": str(av), "actual_price": str(ap),
+            "budget_volume": str(bv), "budget_price": str(bp),
+        },
+        actual_revenue=str(_quantize(actual_revenue)),
+        budget_revenue=str(_quantize(budget_revenue)),
+        volume_effect=str(volume_effect),
+        price_effect=str(price_effect),
+        volume_pct=str(_quantize(volume_effect / total_variance * Decimal("100"), 1)) if total_variance != 0 else "0",
+        price_pct=str(_quantize(price_effect / total_variance * Decimal("100"), 1)) if total_variance != 0 else "0",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Risk & VaR
+# ---------------------------------------------------------------------------
+
+def decimal_value_at_risk(portfolio_value: str, volatility: str, confidence: str = "0.95", days: int = 1) -> dict:
+    """Parametric Value at Risk: VaR = portfolio × volatility × z × sqrt(days).
+    confidence: 0.95 (z=1.645) or 0.99 (z=2.326)
+    """
+    pv = _to_decimal(portfolio_value)
+    vol = _to_decimal(volatility)
+    conf = _to_decimal(confidence)
+    z_lookup = {"0.90": Decimal("1.282"), "0.95": Decimal("1.645"), "0.99": Decimal("2.326")}
+    z = z_lookup.get(str(_quantize(conf, 2)), Decimal("1.645"))
+    import math
+    sqrt_days = Decimal(str(math.sqrt(days)))
+    var = _quantize(pv * vol * z * sqrt_days)
+    return _envelope(
+        var,
+        f"{pv} × {vol} × {z} × sqrt({days})",
+        {
+            "portfolio_value": str(pv), "volatility": str(vol),
+            "confidence": str(conf), "days": days,
+        },
+        z_score=str(z),
+        confidence_pct=str(_quantize(conf * Decimal("100"), 1)),
+        time_horizon_days=days,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Loan & amortisation
+# ---------------------------------------------------------------------------
+
+def decimal_loan_payment(principal: str, annual_rate: str, periods: int) -> dict:
+    """Standard loan payment (PMT): P × r / (1 - (1+r)^-n).
+    annual_rate is decimal (0.05 = 5% APR), periods in months.
+    """
+    p = _to_decimal(principal)
+    annual = _to_decimal(annual_rate)
+    if periods <= 0:
+        raise ValueError("Periods must be positive")
+    monthly_rate = annual / Decimal("12")
+    if monthly_rate == 0:
+        payment = p / Decimal(periods)
+    else:
+        # PMT = P × r / (1 - (1+r)^-n)
+        factor_float = float(Decimal("1") + monthly_rate) ** (-periods)
+        denom = Decimal("1") - Decimal(str(factor_float))
+        payment = p * monthly_rate / denom
+    payment_q = _quantize(payment, 2)
+    total_paid = _quantize(payment_q * Decimal(periods))
+    total_interest = _quantize(total_paid - p)
+    return _envelope(
+        payment_q,
+        f"{p} × {monthly_rate} / (1 - (1 + {monthly_rate})^-{periods})",
+        {"principal": str(p), "annual_rate": str(annual), "periods": periods},
+        total_paid=str(total_paid),
+        total_interest=str(total_interest),
+        monthly_rate=str(_quantize(monthly_rate, 6)),
+        unit="$/period",
     )

@@ -15,6 +15,7 @@ from screencompanion.config import (
     WINDOW_HEIGHT,
     load_user_config,
     save_user_config,
+    get_max_input_chars,
 )
 from screencompanion.ui.theme import get_colors, get_font, CORNER_RADIUS, CORNER_RADIUS_SM, FONT_SIZE, FONT_SIZE_SM, FONT_SIZE_LG, PANEL_PADDING
 from screencompanion.ui.toggle_button import ToggleButton
@@ -305,6 +306,12 @@ class ScreenCompanionApp:
         # Schedule UI updates on main thread
         self._root.after(0, lambda: self._process_document(path, filename))
 
+    def _max_chars_for_active_model(self) -> int | None:
+        """Char cap derived from the active model's input window, or None."""
+        if not self._chat.is_configured():
+            return None
+        return get_max_input_chars(self._chat._provider, self._chat._model)
+
     def _process_document(self, path: str, filename: str):
         """Read and load document content (called on main thread)."""
         ext = Path(path).suffix.lower()
@@ -313,7 +320,7 @@ class ScreenCompanionApp:
         self._toggle.set_doc_detected(True)
 
         try:
-            result = read_document(path)
+            result = read_document(path, max_chars=self._max_chars_for_active_model())
             df = read_dataframe(path)
             self._chat.set_document(path, result.text, result.images, dataframe=df)
             img_note = f", {len(result.images)} image(s)" if result.images else ""
@@ -325,6 +332,27 @@ class ScreenCompanionApp:
             self._chat_widget.add_system_message(str(e))
         except Exception as e:
             self._chat_widget.add_system_message(f"Error reading file: {e}")
+
+    def _reload_active_document(self):
+        """Re-read the currently loaded document with the active model's char cap.
+
+        Called after the user switches model in settings so a switch from a
+        small-window model (Claude 200K) to a large-window one (Gemini 1.5 Pro
+        2M) actually grants the larger document context.
+        """
+        if not self._current_doc_path:
+            return
+        try:
+            result = read_document(
+                self._current_doc_path,
+                max_chars=self._max_chars_for_active_model(),
+            )
+            df = read_dataframe(self._current_doc_path)
+            self._chat.set_document(
+                self._current_doc_path, result.text, result.images, dataframe=df
+            )
+        except Exception:
+            pass  # Best-effort — model switch shouldn't fail because of a re-read
 
     def _on_send_message(self, text: str):
         """Handle user message from chat input."""
@@ -358,13 +386,10 @@ class ScreenCompanionApp:
         self._chat_widget.hide_typing_indicator()
         self._chat_widget.set_input_enabled(True)
 
-        # Check for edit instructions
+        # Check for edit instructions (still parsed here — edits are user-confirmed)
         edits = DocumentChat.parse_edit_instructions(response)
 
-        # Check for math calculation instructions
-        math_instr = DocumentChat.parse_math_instructions(response)
-
-        # Show the text response (strip the JSON block for cleaner display)
+        # Show the text response (strip any leftover JSON block for cleaner display)
         import re
         display_text = re.sub(
             r"```json\s*\n?\{.*?\}\s*\n?```", "", response, flags=re.DOTALL
@@ -372,19 +397,21 @@ class ScreenCompanionApp:
         if display_text:
             self._chat_widget.add_bot_message(display_text)
 
-        # Execute and display math calculation if detected
-        if math_instr:
-            try:
-                result = DocumentChat.execute_math(
-                    math_instr["function"], math_instr["args"]
+        # Render math sidebar from the envelope produced inside chat.ask().
+        # The math has already been executed and fed back to the LLM, so the
+        # bot prose above already reflects this exact result.
+        math_envelope = self._chat.consume_last_math_result()
+        if math_envelope is not None:
+            if "error" in math_envelope:
+                self._chat_widget.add_system_message(
+                    f"Calculation error: {math_envelope['error']}"
                 )
-                unit = result.get("unit", "")
-                result_val = result["result"]
-                formula = result["formula"]
+            else:
+                unit = math_envelope.get("unit", "")
+                result_val = math_envelope.get("result", "")
+                formula = math_envelope.get("formula", "")
                 display = f"Result: {result_val}{unit}\nFormula: {formula}"
                 self._chat_widget.add_system_message(display)
-            except Exception as e:
-                self._chat_widget.add_system_message(f"Calculation error: {e}")
 
         # Show edit proposal if detected
         if edits and self._current_doc_path:
@@ -721,6 +748,9 @@ class ScreenCompanionApp:
 
             validator_info = f" + {LLM_PROVIDERS[v_key]['name']} validator" if v_key else ""
             self._chat.configure(provider_key, api_key, model)
+            # Re-read the active document with the new model's char cap so a
+            # switch to a larger-window model actually expands available context.
+            self._reload_active_document()
             self._chat_widget.add_system_message(
                 f"Configured: {name} / {model}{validator_info}"
             )

@@ -54,11 +54,15 @@ def read_dataframe(path: str):
     return None
 
 
-def read_document(path: str) -> DocumentResult:
+def read_document(path: str, max_chars: int | None = None) -> DocumentResult:
     """Read document content as text plus any embedded images.
 
     Raises UnsupportedFormatError for unknown formats,
     FileTooLargeError for files exceeding MAX_FILE_SIZE_MB.
+
+    max_chars overrides the default MAX_CONTENT_CHARS truncation cap.
+    Pass the active model's per-model char budget (see
+    config.get_max_input_chars) to maximize file-reading capacity.
     """
     p = Path(path)
 
@@ -102,10 +106,11 @@ def read_document(path: str) -> DocumentResult:
     text = reader(path)
 
     # Truncate text if too long
-    if len(text) > MAX_CONTENT_CHARS:
+    cap = max_chars if max_chars is not None else MAX_CONTENT_CHARS
+    if len(text) > cap:
         text = (
-            text[:MAX_CONTENT_CHARS]
-            + f"\n\n[Content truncated at {MAX_CONTENT_CHARS:,} characters. "
+            text[:cap]
+            + f"\n\n[Content truncated at {cap:,} characters. "
             "Ask about specific sections for more detail.]"
         )
 
