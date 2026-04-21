@@ -64,6 +64,7 @@ CODE_GEN_SYSTEM_PROMPT = (
     "- Store the final human-readable answer as a string in a variable called `result`\n"
     "- Filter and look up data exactly as asked — never guess or infer category/field values\n"
     "- If the result is a list or table, format it as a readable string\n"
+    "- For datetime values: if the time part is midnight (00:00:00), show only the date (str(val.date())). If the date part is 1900-01-01 or today, show only the time (str(val.time())). Otherwise show both date and time (str(val)). Never show '00:00:00' when the original data only has a date.\n"
     "- Return ONLY the Python code, no explanation or markdown"
 )
 
@@ -350,6 +351,20 @@ WIN_COM_MAP = {
     "WINWORD.EXE": ("Word.Application", "ActiveDocument.FullName"),
     "EXCEL.EXE": ("Excel.Application", "ActiveWorkbook.FullName"),
     "POWERPNT.EXE": ("PowerPoint.Application", "ActivePresentation.FullName"),
+    "ACROBAT.EXE": ("AcroExch.App", None),   # special handling
+    "ACRORD32.EXE": ("AcroExch.App", None),  # Acrobat Reader 32-bit
+    "ACRORD64.EXE": ("AcroExch.App", None),  # Acrobat Reader 64-bit
+}
+
+# WPS Office and other apps that embed the file path in the window title.
+# Maps process name (upper) to the separator used in the title.
+WIN_TITLE_APPS = {
+    "WPS.EXE", "WPSOFFICE.EXE", "ET.EXE", "WPP.EXE",       # WPS Office
+    "LIBREOFFICE.EXE", "SOFFICE.EXE",                        # LibreOffice
+    "NOTEPAD.EXE", "NOTEPAD++.EXE", "WORDPAD.EXE",           # Text editors
+    "CODE.EXE",                                               # VS Code
+    "FOXITREADER.EXE", "FOXITPDFEDITOR.EXE",                  # Foxit PDF
+    "SUMATRAPDF.EXE",                                         # SumatraPDF
 }
 
 # ── User config persistence ───────────────────────────────────────

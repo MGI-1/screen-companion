@@ -37,7 +37,11 @@ class FileTooLargeError(Exception):
 
 
 def read_dataframe(path: str):
-    """Return a pandas DataFrame for CSV/XLSX files, or None for other formats."""
+    """Return a pandas DataFrame for CSV/XLSX files, or None for other formats.
+
+    For multi-sheet workbooks, all sheets are concatenated with a '_sheet_name'
+    column so that every sheet is queryable.
+    """
     try:
         import pandas as pd
     except ImportError:
@@ -48,7 +52,18 @@ def read_dataframe(path: str):
         if ext == ".csv":
             return pd.read_csv(path)
         elif ext in (".xlsx", ".xls"):
-            return pd.read_excel(path)
+            sheets = pd.read_excel(path, sheet_name=None)  # dict of DataFrames
+            if not sheets:
+                return None
+            if len(sheets) == 1:
+                return next(iter(sheets.values()))
+            # Tag each sheet and concatenate
+            frames = []
+            for name, df in sheets.items():
+                df = df.copy()
+                df.insert(0, "_sheet_name", name)
+                frames.append(df)
+            return pd.concat(frames, ignore_index=True)
     except Exception:
         return None
     return None

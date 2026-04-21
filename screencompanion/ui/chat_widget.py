@@ -51,9 +51,20 @@ class ChatWidget(ctk.CTkToplevel):
 
         self._build_ui()
         self.withdraw()  # Hidden by default
+        self._shown_once = False
+
+        # Handle window close (X button) — quit the entire app
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        """Quit the entire application when the chat window is closed."""
+        if self._shown_once:
+            import sys
+            sys.exit(0)
 
     def show(self, x: int, y: int):
         """Show the panel positioned above the toggle button."""
+        self._shown_once = True
         panel_x = x + 52 - WINDOW_WIDTH  # align right edge with button
         panel_y = y - WINDOW_HEIGHT - 10  # above the button
         # Ensure panel stays on screen
@@ -228,6 +239,11 @@ class ChatWidget(ctk.CTkToplevel):
             scrollbar_button_hover_color=colors["accent"],
         )
         self._chat_frame.pack(fill="both", expand=True, padx=0, pady=0)
+        # Fix internal canvas background to match theme (prevents green flash)
+        try:
+            self._chat_frame._parent_canvas.configure(bg=colors["bg"])
+        except Exception:
+            pass
 
         # ── Input area ─────────────────────────────────────────
         self._input_frame = ctk.CTkFrame(
@@ -350,6 +366,7 @@ class ChatWidget(ctk.CTkToplevel):
     def add_bot_message(self, text: str):
         """Add a bot message bubble (left-aligned, glass)."""
         colors = get_colors(self._mode)
+        max_bubble_width = WINDOW_WIDTH - 2 * PANEL_PADDING - 20
 
         wrapper = ctk.CTkFrame(self._chat_frame, fg_color="transparent")
         wrapper.pack(fill="x", padx=PANEL_PADDING, pady=(2, 4))
@@ -368,7 +385,7 @@ class ChatWidget(ctk.CTkToplevel):
             text=text,
             font=get_font(FONT_SIZE),
             text_color=colors["bot_bubble_text"],
-            wraplength=WINDOW_WIDTH - 100,
+            wraplength=max_bubble_width - 20,
             justify="left",
             anchor="w",
         )
@@ -379,6 +396,7 @@ class ChatWidget(ctk.CTkToplevel):
     def add_system_message(self, text: str):
         """Add a system notification (centered, muted)."""
         colors = get_colors(self._mode)
+        max_wrap = WINDOW_WIDTH - 2 * PANEL_PADDING - 10
 
         wrapper = ctk.CTkFrame(self._chat_frame, fg_color="transparent")
         wrapper.pack(fill="x", padx=PANEL_PADDING, pady=(6, 6))
@@ -388,6 +406,8 @@ class ChatWidget(ctk.CTkToplevel):
             text=text,
             font=get_font(FONT_SIZE_SM),
             text_color=colors["system_msg"],
+            wraplength=max_wrap,
+            justify="center",
             anchor="center",
         )
         label.pack()
@@ -557,6 +577,10 @@ class ChatWidget(ctk.CTkToplevel):
 
         # Update chat frame
         self._chat_frame.configure(fg_color=colors["bg"])
+        try:
+            self._chat_frame._parent_canvas.configure(bg=colors["bg"])
+        except Exception:
+            pass
 
         # Update input area
         self._input_frame.configure(fg_color=colors["bg_glass"])

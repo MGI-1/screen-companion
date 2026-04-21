@@ -5,7 +5,7 @@ import sys
 if sys.platform == "darwin":
     from screencompanion.detector.macos import MacOSDetector as Detector
 elif sys.platform == "win32":
-    from docwizard.detector.windows import WindowsDetector as Detector
+    from screencompanion.detector.windows import WindowsDetector as Detector
 else:
     raise RuntimeError(
         f"Screen Companion currently supports macOS and Windows, not {sys.platform}"

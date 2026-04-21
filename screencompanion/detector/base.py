@@ -53,9 +53,14 @@ class FocusWatcher:
         self._running = False
 
     def check_now(self) -> Optional[str]:
-        """Immediately check for the current document (blocking)."""
+        """Immediately check for the current document (blocking).
+
+        Unlike the poll loop, always fires on_change when a path is found,
+        even if it matches the last seen path — the user clicked detect
+        because they want to confirm/refresh what's loaded.
+        """
         path = self._detector.get_document_path()
-        if path and path != self._current_path:
+        if path:
             self._current_path = path
             self._on_change(path)
         return self._current_path

@@ -201,7 +201,19 @@ class DocumentChat:
 
         df = self._dataframe
         schema = "\n".join(f"  {col}: {dtype}" for col, dtype in df.dtypes.items())
-        sample = df.head(3).to_string(index=False)
+
+        # For multi-sheet workbooks, show samples per sheet so the LLM knows the structure
+        if "_sheet_name" in df.columns:
+            sample_parts = []
+            for sheet_name in df["_sheet_name"].unique():
+                sheet_df = df[df["_sheet_name"] == sheet_name]
+                sample_parts.append(
+                    f"Sheet '{sheet_name}' ({len(sheet_df)} rows):\n"
+                    + sheet_df.head(3).to_string(index=False)
+                )
+            sample = "\n\n".join(sample_parts)
+        else:
+            sample = df.head(3).to_string(index=False)
 
         raw = self._call_one_shot(
             self._provider,
@@ -235,8 +247,24 @@ class DocumentChat:
             raise ValueError("Code did not set `result`")
 
         if hasattr(result, "to_string"):
-            return result.to_string(index=False)
-        return str(result)
+            text = result.to_string(index=False)
+        else:
+            text = str(result)
+
+        return self._clean_datetime_strings(text)
+
+    @staticmethod
+    def _clean_datetime_strings(text: str) -> str:
+        """Strip fake time/date parts from datetime strings in output.
+
+        - '2023-03-09 00:00:00' → '2023-03-09' (midnight = date only)
+        - '1900-01-01 14:30:00' → '14:30:00'   (placeholder date = time only)
+        """
+        # Remove midnight timestamps (date-only values)
+        text = re.sub(r'(\d{4}-\d{2}-\d{2})\s+00:00:00(?:\.0+)?', r'\1', text)
+        # Remove placeholder date for time-only values
+        text = re.sub(r'1900-01-01\s+(\d{2}:\d{2}:\d{2})', r'\1', text)
+        return text
 
     def _get_validator_answers(self, question: str) -> list[str]:
         """Get independent answers from all 3 models of the validator provider."""

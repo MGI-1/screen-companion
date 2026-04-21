@@ -36,7 +36,8 @@ class ScreenCompanionApp:
         # Init customtkinter
         ctk.set_appearance_mode("dark" if self._mode == "dark" else "light")
         self._root = ctk.CTk()
-        self._root.withdraw()  # Hide the root window
+        self._root.geometry("1x1+-10000+-10000")  # Off-screen, not withdrawn
+        self._root.overrideredirect(True)          # No title bar
 
         # Chat engine
         self._chat = DocumentChat()
