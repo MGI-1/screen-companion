@@ -84,17 +84,14 @@ class FocusWatcher:
                     self._current_path = path
                     self._current_proc = new_proc
                     self._on_change(path)
-                elif proc_changed and not path:
-                    # User switched to an app that has no detectable document
-                    # (e.g. VS Code with no file open, desktop, taskbar).
-                    # Clear so Screen Companion reflects the current screen.
-                    self._current_path = None
-                    self._current_proc = new_proc
-                    if self._on_clear:
-                        self._on_clear()
                 elif proc_changed:
-                    # Process changed but path will be handled above next tick.
+                    # App switched — always update the tracked process.
                     self._current_proc = new_proc
+                    if not path and self._current_path is not None:
+                        # Had a document before; now there's nothing — clear once.
+                        self._current_path = None
+                        if self._on_clear:
+                            self._on_clear()
 
             except Exception:
                 pass  # Silently continue polling

@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from screencompanion.config import WIN_COM_MAP, WIN_TITLE_APPS, SUPPORTED_READ_FORMATS
+from screencompanion.config import WIN_COM_MAP, WIN_TITLE_APPS, WIN_BROWSER_PROCS, SUPPORTED_READ_FORMATS
 from screencompanion.detector.base import BaseDetector
 
 # Process names for apps where we should always try open-file-handle detection
@@ -84,6 +84,11 @@ _BLOCKED_FILENAMES = {
     "debug.log",
     "output.log",
     "install.log",
+    # Microsoft / Windows logs
+    "microsoft authentication.log",
+    "aadplugin.log",
+    "msal.log",
+    "wam.log",
 }
 
 # Known app name suffixes to strip from window titles
@@ -148,6 +153,12 @@ class WindowsDetector(BaseDetector):
     def _extract_path_for(self, title: str, proc_name: str) -> Optional[str]:
         """Try every detection strategy for a single window/process."""
         proc_upper = proc_name.upper()
+
+        # Browsers are handled by the WebSocket extension — skip file detection
+        # so the FocusWatcher doesn't clear the document while the extension
+        # is about to send the page content.
+        if proc_upper in WIN_BROWSER_PROCS:
+            return None
 
         path = self._try_com_automation(proc_name)
         if path:

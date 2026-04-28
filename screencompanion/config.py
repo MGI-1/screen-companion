@@ -367,6 +367,14 @@ WIN_TITLE_APPS = {
     "SUMATRAPDF.EXE",                                         # SumatraPDF
 }
 
+# Browser processes — content comes via the browser extension (WebSocket),
+# not from file detection. The detector returns None for these so the
+# FocusWatcher doesn't clear the document while waiting for the extension.
+WIN_BROWSER_PROCS = {
+    "CHROME.EXE", "MSEDGE.EXE", "FIREFOX.EXE",
+    "BRAVE.EXE", "OPERA.EXE", "VIVALDI.EXE",
+}
+
 # ── User config persistence ───────────────────────────────────────
 CONFIG_DIR = Path.home() / ".screencompanion"
 CONFIG_FILE = CONFIG_DIR / "config.json"
