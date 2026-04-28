@@ -89,6 +89,9 @@ _BLOCKED_FILENAMES = {
     "aadplugin.log",
     "msal.log",
     "wam.log",
+    "container tools.log",
+    "windowspackagemanager.log",
+    "windowsterminal.log",
 }
 
 # Known app name suffixes to strip from window titles
