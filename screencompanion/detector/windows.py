@@ -54,22 +54,36 @@ _OPEN_FILE_PATH_BLOCKLIST = (
 # Exact filenames (case-insensitive) that are tool/IDE internals and should
 # never be treated as user documents regardless of where they live on disk.
 _BLOCKED_FILENAMES = {
-    "typescript.log",       # VS Code TypeScript language server log
-    "tsserver.log",         # VS Code TS server alternate log
+    # VS Code internal logs
+    "typescript.log",
+    "tsserver.log",
+    "exthosttelemetry.log",
+    "exthost.log",
+    "extension-host.log",
+    "renderer.log",
+    "main.log",
+    "sharedprocess.log",
+    "watcherservice.log",
+    "network.log",
+    "window1.log",
+    "window2.log",
+    "window3.log",
+    # Language server logs
     "eslint.log",
     "pylsp.log",
     "pyright.log",
     "lsp.log",
-    "extension-host.log",
-    "exthost.log",
-    "renderer.log",
-    "main.log",
-    "sharedprocess.log",
-    "watcherService.log",
+    "pylance.log",
+    # Package manager logs
     "npm-debug.log",
     "yarn-error.log",
     "yarn-debug.log",
     "pnpm-debug.log",
+    # Generic tool logs
+    "error.log",
+    "debug.log",
+    "output.log",
+    "install.log",
 }
 
 # Known app name suffixes to strip from window titles
@@ -118,32 +132,18 @@ class WindowsDetector(BaseDetector):
             return None
 
     def get_document_path(self) -> Optional[str]:
-        """Get the file path of a document.
+        """Get the file path of the document in the foreground window.
 
-        Order of preference:
-          1. The foreground window — strongest signal of user intent.
-          2. Any other visible document window.
+        Only the foreground window is checked — background windows are
+        intentionally ignored. This ensures Screen Companion always shows
+        what the user is currently looking at, not a document sitting
+        behind another app.
         """
         fg = self.get_frontmost_app()
-        if fg:
-            title, proc_name = fg
-            path = self._extract_path_for(title, proc_name)
-            if path:
-                return path
-
-        # Fallback: scan all visible windows (e.g. document is in a partially
-        # obscured window, or the frontmost is a utility without a document)
-        candidates = self._get_all_document_windows()
-        fg_proc = fg[1].upper() if fg else None
-
-        for title, proc_name in candidates:
-            if proc_name.upper() == fg_proc:
-                continue  # already tried
-            path = self._extract_path_for(title, proc_name)
-            if path:
-                return path
-
-        return None
+        if not fg:
+            return None
+        title, proc_name = fg
+        return self._extract_path_for(title, proc_name)
 
     def _extract_path_for(self, title: str, proc_name: str) -> Optional[str]:
         """Try every detection strategy for a single window/process."""
