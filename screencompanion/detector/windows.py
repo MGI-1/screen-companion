@@ -8,24 +8,6 @@ from typing import Optional
 from screencompanion.config import WIN_COM_MAP, WIN_TITLE_APPS, SUPPORTED_READ_FORMATS
 from screencompanion.detector.base import BaseDetector
 
-# Apps that are code/text editors — when one of these is the foreground
-# window we skip detection entirely. They open too many internal files
-# (logs, configs, caches) that are never the user's intended document.
-# The user should switch to the document app (Word, Excel, browser, etc.)
-# for Screen Companion to pick it up.
-_SKIP_WHEN_FOCUSED = {
-    "CODE.EXE",           # VS Code
-    "CODE - INSIDERS.EXE",
-    "CURSOR.EXE",         # Cursor AI editor
-    "WINDSURF.EXE",
-    "SUBLIME_TEXT.EXE",   # Sublime Text
-    "ATOM.EXE",
-    "NOTEPAD++.EXE",
-    "NOTEPAD.EXE",
-    "WORDPAD.EXE",
-    "FLEET.EXE",          # JetBrains Fleet
-}
-
 # Process names for apps where we should always try open-file-handle detection
 _ALWAYS_TRY_OPEN_FILES = {
     # Adobe Acrobat / Reader
@@ -166,11 +148,6 @@ class WindowsDetector(BaseDetector):
     def _extract_path_for(self, title: str, proc_name: str) -> Optional[str]:
         """Try every detection strategy for a single window/process."""
         proc_upper = proc_name.upper()
-
-        # Skip code editors when they are the focused window — they keep
-        # too many internal files open that are not user documents.
-        if proc_upper in _SKIP_WHEN_FOCUSED:
-            return None
 
         path = self._try_com_automation(proc_name)
         if path:
