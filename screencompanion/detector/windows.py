@@ -51,6 +51,27 @@ _OPEN_FILE_PATH_BLOCKLIST = (
     "\\windows\\",
 )
 
+# Exact filenames (case-insensitive) that are tool/IDE internals and should
+# never be treated as user documents regardless of where they live on disk.
+_BLOCKED_FILENAMES = {
+    "typescript.log",       # VS Code TypeScript language server log
+    "tsserver.log",         # VS Code TS server alternate log
+    "eslint.log",
+    "pylsp.log",
+    "pyright.log",
+    "lsp.log",
+    "extension-host.log",
+    "exthost.log",
+    "renderer.log",
+    "main.log",
+    "sharedprocess.log",
+    "watcherService.log",
+    "npm-debug.log",
+    "yarn-error.log",
+    "yarn-debug.log",
+    "pnpm-debug.log",
+}
+
 # Known app name suffixes to strip from window titles
 _APP_SUFFIXES = [
     "- Adobe Acrobat Reader", "- Adobe Acrobat Pro", "- Adobe Acrobat",
@@ -214,6 +235,12 @@ class WindowsDetector(BaseDetector):
 
         return None
 
+    @staticmethod
+    def _is_blocked_filename(path: str) -> bool:
+        """Return True if the filename is a known IDE/tool internal log."""
+        from pathlib import Path as _Path
+        return _Path(path).name.lower() in _BLOCKED_FILENAMES
+
     def _try_window_title(self, title: str, proc_upper: str = "") -> Optional[str]:
         """Try extracting a file path from the window title."""
         if not title:
@@ -255,6 +282,9 @@ class WindowsDetector(BaseDetector):
     def _search_for_file(self, filename: str) -> Optional[str]:
         """Search common directories for a matching filename."""
         if not filename or len(filename) < 2:
+            return None
+
+        if filename.lower() in _BLOCKED_FILENAMES:
             return None
 
         ext = Path(filename).suffix.lower()
@@ -333,6 +363,8 @@ class WindowsDetector(BaseDetector):
                             continue
                         lowered = path.lower()
                         if any(frag in lowered for frag in _OPEN_FILE_PATH_BLOCKLIST):
+                            continue
+                        if self._is_blocked_filename(path):
                             continue
                         candidates.append(path)
                 except (psutil.AccessDenied, psutil.NoSuchProcess):
