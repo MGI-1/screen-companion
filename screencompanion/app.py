@@ -23,6 +23,7 @@ from screencompanion.ui.chat_widget import ChatWidget
 from screencompanion.chat import DocumentChat
 from screencompanion.reader import read_document, read_dataframe, UnsupportedFormatError, FileTooLargeError
 from screencompanion.editor import apply_edits, UnsupportedEditError
+from screencompanion.browser_server import BrowserServer
 
 
 class ScreenCompanionApp:
@@ -61,6 +62,18 @@ class ScreenCompanionApp:
         self._detector = None
         self._watcher = None
         self._init_detector()
+
+        # Browser extension WebSocket server
+        self._browser_server = BrowserServer(on_content=self._on_browser_content)
+        self._browser_server.start()
+        if not self._browser_server.available:
+            # Surface the pip install hint once at startup
+            self._root.after(
+                1000,
+                lambda: self._chat_widget.add_system_message(
+                    self._browser_server.missing_msg
+                ),
+            )
 
         # Show settings on first launch if not configured
         if not self._chat.is_configured():
@@ -306,6 +319,29 @@ class ScreenCompanionApp:
 
         # Schedule UI updates on main thread
         self._root.after(0, lambda: self._process_document(path, filename))
+
+    def _on_browser_content(self, url: str, title: str, text: str):
+        """Called from the BrowserServer asyncio thread when the extension sends a page."""
+        # Cap text to the active model's char budget (same logic as local files)
+        max_chars = self._max_chars_for_active_model()
+        if max_chars and len(text) > max_chars:
+            text = text[:max_chars] + "\n\n[Content truncated to fit model context window]"
+
+        self._current_doc_path = url  # Use URL as the "path" for browser pages
+        # Marshal to the Tk main thread before touching UI or chat state
+        self._root.after(0, lambda: self._process_browser_page(url, title, text))
+
+    def _process_browser_page(self, url: str, title: str, text: str):
+        """Load browser page content into the chat (called on main thread)."""
+        # Use a short display label: just the page title (truncated if needed)
+        display = title[:60] + "…" if len(title) > 60 else title
+
+        self._chat.set_document(url, text)
+        self._chat_widget.set_document_status(display, editable=False)
+        self._toggle.set_doc_detected(True)
+        self._chat_widget.add_system_message(
+            f"Browser page loaded: {display} ({len(text):,} chars)"
+        )
 
     def _max_chars_for_active_model(self) -> int | None:
         """Char cap derived from the active model's input window, or None."""

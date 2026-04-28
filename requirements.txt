@@ -18,6 +18,9 @@ openpyxl>=3.1.0
 python-pptx>=1.0.0
 pymupdf>=1.24.0
 
+# Browser extension WebSocket bridge
+websockets>=12.0
+
 # Platform-specific
 pywin32>=305; sys_platform == "win32"
 pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"

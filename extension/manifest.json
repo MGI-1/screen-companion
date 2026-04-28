@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Screen Companion Bridge",
+  "version": "1.0",
+  "description": "Sends the active tab's content to Screen Companion so you can chat with any webpage.",
+
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabs",
+    "storage"
+  ],
+
+  "host_permissions": [
+    "<all_urls>"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content_script.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Screen Companion Bridge"
+  }
+}
