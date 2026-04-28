@@ -115,6 +115,7 @@ class ScreenCompanionApp:
             self._watcher = FocusWatcher(
                 detector=self._detector,
                 on_change=self._on_document_change,
+                on_clear=self._on_document_cleared,
             )
             self._watcher.start()
         except (RuntimeError, ImportError) as e:
@@ -319,6 +320,17 @@ class ScreenCompanionApp:
 
         # Schedule UI updates on main thread
         self._root.after(0, lambda: self._process_document(path, filename))
+
+    def _on_document_cleared(self):
+        """Called when the user switches to an app with no detectable document."""
+        self._current_doc_path = None
+        self._root.after(0, self._clear_document_status)
+
+    def _clear_document_status(self):
+        """Reset the UI to show no document is loaded (called on main thread)."""
+        self._chat.set_document("", "")
+        self._chat_widget.set_document_status("No document detected", editable=False)
+        self._toggle.set_doc_detected(False)
 
     def _on_browser_content(self, url: str, title: str, text: str):
         """Called from the BrowserServer asyncio thread when the extension sends a page."""

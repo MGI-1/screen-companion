@@ -29,12 +29,15 @@ class FocusWatcher:
         self,
         detector: BaseDetector,
         on_change: Callable[[str], None],
+        on_clear: Optional[Callable[[], None]] = None,
         interval: float = POLL_INTERVAL_SECONDS,
     ):
         self._detector = detector
         self._on_change = on_change
+        self._on_clear = on_clear          # called when app changes but has no document
         self._interval = interval
         self._current_path: Optional[str] = None
+        self._current_proc: Optional[str] = None   # tracks foreground process name
         self._running = False
         self._thread: Optional[threading.Thread] = None
 
@@ -68,10 +71,31 @@ class FocusWatcher:
     def _poll_loop(self):
         while self._running:
             try:
+                # Track which process is in the foreground so we know when
+                # the user switches apps.
+                app_info = self._detector.get_frontmost_app()
+                new_proc = app_info[1] if app_info else None
+                proc_changed = new_proc != self._current_proc
+
                 path = self._detector.get_document_path()
+
                 if path and path != self._current_path:
+                    # New document detected — load it.
                     self._current_path = path
+                    self._current_proc = new_proc
                     self._on_change(path)
+                elif proc_changed and not path:
+                    # User switched to an app that has no detectable document
+                    # (e.g. VS Code with no file open, desktop, taskbar).
+                    # Clear so Screen Companion reflects the current screen.
+                    self._current_path = None
+                    self._current_proc = new_proc
+                    if self._on_clear:
+                        self._on_clear()
+                elif proc_changed:
+                    # Process changed but path will be handled above next tick.
+                    self._current_proc = new_proc
+
             except Exception:
                 pass  # Silently continue polling
             time.sleep(self._interval)
