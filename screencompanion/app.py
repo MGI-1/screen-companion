@@ -387,6 +387,12 @@ class ScreenCompanionApp:
         self._chat_widget.hide_typing_indicator()
         self._chat_widget.set_input_enabled(True)
 
+        # Show what the interpreter understood so the user can catch
+        # misreads early. Consumed (one-shot) so it never re-renders.
+        interp = self._chat.consume_last_interpretation()
+        if interp is not None:
+            self._chat_widget.add_system_message(interp.ui_summary())
+
         # Check for edit instructions (still parsed here — edits are user-confirmed)
         edits = DocumentChat.parse_edit_instructions(response)
 

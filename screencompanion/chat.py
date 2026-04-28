@@ -10,6 +10,7 @@ from screencompanion.config import (
     CODE_GEN_SYSTEM_PROMPT, CODE_GEN_USER_TEMPLATE,
     get_output_tokens, is_reasoning_model,
 )
+from screencompanion.interpreter import interpret, Interpretation
 
 
 class DocumentChat:
@@ -30,6 +31,7 @@ class DocumentChat:
         self._dataframe = None  # pandas DataFrame for CSV/XLSX files
         self._output_tokens: int = 4_096
         self._last_math_result: Optional[dict] = None  # consumed by app.py for sidebar
+        self._last_interpretation: Optional[Interpretation] = None  # consumed by app.py for UI hint
 
     def configure(self, provider: str, api_key: str, model: str = ""):
         """Set the LLM provider and API key."""
@@ -70,6 +72,13 @@ class DocumentChat:
 
         # Reset prior math result so app.py never re-renders a stale sidebar
         self._last_math_result = None
+
+        # Intelligent input interpretation: classify intent, extract entities,
+        # scan the document for the sections most likely to contain the
+        # answer. Injected into the system prompt (_build_system_prompt
+        # reads self._last_interpretation) so every LLM turn is sharpened
+        # without polluting conversation history.
+        self._last_interpretation = interpret(user_message, self.document_content)
 
         self.messages.append({"role": "user", "content": user_message})
 
@@ -367,14 +376,36 @@ class DocumentChat:
         raise ValueError(f"Unknown provider: {provider}")
 
     def _build_system_prompt(self) -> str:
-        """Build system prompt with document context."""
+        """Build system prompt with document context and intent framing."""
         prompt = SYSTEM_PROMPT
         if self.document_content:
             prompt += (
                 f"\n\nThe user has the following document open: {self.document_path}\n\n"
                 f"<document_content>\n{self.document_content}\n</document_content>"
             )
+
+        interp = self._last_interpretation
+        if interp is not None:
+            framing = interp.to_task_framing()
+            prompt += f"\n\n<task_framing>\n{framing}\n</task_framing>"
+            if interp.relevant_excerpts:
+                joined = "\n\n---\n\n".join(interp.relevant_excerpts)
+                prompt += (
+                    "\n\n<likely_relevant_sections>\n"
+                    "These excerpts from the document scored highest against the "
+                    "user's keywords. Prefer answering from them when sufficient, "
+                    "but fall back to the full document if they don't cover the "
+                    "question.\n\n"
+                    f"{joined}\n"
+                    "</likely_relevant_sections>"
+                )
         return prompt
+
+    def consume_last_interpretation(self) -> Optional[Interpretation]:
+        """Pop and return the interpretation from the most recent ask() call."""
+        interp = self._last_interpretation
+        self._last_interpretation = None
+        return interp
 
     def _ask_anthropic(self, inject_images: bool = False) -> str:
         """Call Anthropic Claude API."""
