@@ -11,6 +11,9 @@ from screencompanion.config import (
     get_output_tokens, is_reasoning_model,
 )
 from screencompanion.interpreter import interpret, Interpretation
+from screencompanion.logging_setup import get_logger
+
+_log = get_logger("chat")
 
 
 class DocumentChat:
@@ -37,7 +40,13 @@ class DocumentChat:
         """Set the LLM provider and API key."""
         self._provider = provider
         self._api_key = api_key
-        self._model = model or LLM_PROVIDERS[provider]["default_model"]
+        info = LLM_PROVIDERS[provider]
+        # A model saved by an older build may no longer be offered; fall back
+        # rather than sending a name the API will reject.
+        if model and model in info.get("models", []):
+            self._model = model
+        else:
+            self._model = info["default_model"]
         self._output_tokens = get_output_tokens(self._provider, self._model)
         self._client = None  # Reset client to force re-init
 
@@ -64,11 +73,31 @@ class DocumentChat:
         self.document_images = images or []
         self._images_pending = bool(self.document_images)
         self._dataframe = dataframe
+        # Rebuild the provider client on the next call. Google Gemini bakes the
+        # document text into the client's system_instruction at CREATION time
+        # and reuses that client for every later message — so without this reset
+        # a client created while the previous document was open keeps answering
+        # about that document even after the user switches files. (Anthropic /
+        # OpenAI pass the system prompt per-request, so they were unaffected;
+        # resetting them here is harmless — they just re-init.)
+        self._client = None
 
     def ask(self, user_message: str) -> str:
         """Send a message and return the LLM response."""
         if not self.is_configured():
             return "Please configure your LLM provider in settings first."
+
+        # No document loaded → refuse rather than let the model hallucinate an
+        # answer about a document that isn't there. Detection can briefly clear
+        # the document (focus flapping between windows); a question asked in
+        # that window would otherwise get a fully fabricated answer with no
+        # grounding (e.g. inventing an "Intellectual Property" contract section
+        # for a task spreadsheet).
+        if not self.document_content and self._dataframe is None:
+            return (
+                "No document is loaded, so there's nothing for me to read yet. "
+                "Switch to a document (or click the 🔍 detect button) and ask again."
+            )
 
         # Reset prior math result so app.py never re-renders a stale sidebar
         self._last_math_result = None
@@ -82,8 +111,31 @@ class DocumentChat:
 
         self.messages.append({"role": "user", "content": user_message})
 
-        # For structured data (CSV/XLSX), execute pandas code for precise answers
-        if self._dataframe is not None:
+        # Excel/CSV (a DataFrame is available): ALWAYS answer by generating and
+        # running code — it is exact and deterministic (user preference). Other
+        # document types (PDF/Word/text) have no DataFrame to run code against,
+        # so they fall through to the LLM, which emits a calculation block only
+        # when the question actually needs math (see the system-prompt guidance
+        # keyed off the detected intent) — i.e. code is used there only if
+        # required.
+        use_code = self._dataframe is not None
+        _log.info(
+            "ask: path=%r df_present=%s content_len=%d use_code=%s",
+            self.document_path, self._dataframe is not None,
+            len(self.document_content or ""), use_code,
+        )
+        if use_code:
+            # Distinct-value count/list questions ("how many owners", "give me
+            # the list of owners") are answered by a fixed Python computation,
+            # NOT LLM-generated code. The generator is non-deterministic — it
+            # would sometimes count cell entries (11) and sometimes split them
+            # into individuals (5), and its list would drop/duplicate rows — so
+            # the count and the list could disagree. Computing both from the
+            # same `unique()` here makes them always consistent.
+            det = self._try_distinct_value_answer(user_message)
+            if det is not None:
+                self.messages.append({"role": "assistant", "content": det})
+                return det
             try:
                 response = self._ask_with_code(user_message)
                 self.messages.append({"role": "assistant", "content": response})
@@ -204,6 +256,108 @@ class DocumentChat:
         self._last_math_result = None
         return envelope
 
+    # Cell separators that bundle several names/items into one cell, e.g.
+    # "Aman, Anutosh, Rishabh" or "Anutosh and Rishabh" or "Rishabh (+Anutosh)".
+    _BUNDLE_SPLIT = re.compile(r"\s*(?:,|&|\+|/|\band\b)\s*", re.IGNORECASE)
+    _FILTER_CUES = re.compile(
+        r"\b(assigned to|owned by|responsible for|handled by|belongs?\s+to|"
+        r"above|below|greater than|less than|more than|at least|at most|"
+        r"top\s+\d|bottom\s+\d|where\b.*\bis)\b",
+        re.IGNORECASE,
+    )
+    _LIST_CUES = re.compile(r"\b(list|names?\s+of|who\s+(are|is)|show\s+me)\b", re.IGNORECASE)
+    _COUNT_CUES = re.compile(r"\b(how\s+many|number\s+of|count|how\s+much)\b", re.IGNORECASE)
+
+    def _match_column(self, question: str):
+        """Return the DataFrame column the question refers to, or None.
+
+        Matches a column name (or its singular/plural form) as a whole word in
+        the question — e.g. "owners" → the "Owner" column.
+        """
+        ql = question.lower()
+        best = None
+        for col in self._dataframe.columns:
+            cl = str(col).lower().strip()
+            if not cl or cl.startswith("_"):
+                continue
+            variants = {cl, cl + "s", cl[:-1] if cl.endswith("s") else cl}
+            if any(v and re.search(r"\b" + re.escape(v) + r"\b", ql) for v in variants):
+                if best is None or len(cl) > len(str(best).lower()):
+                    best = col
+        return best
+
+    def _try_distinct_value_answer(self, question: str):
+        """Deterministically answer 'how many / list the distinct values of column X'.
+
+        Computes the count AND the list from the SAME `unique()` result so they
+        can never disagree — unlike LLM-generated code, which varies run to run.
+        When cells bundle several names, also reports the distinct individuals
+        in parentheses so the number is unambiguous (e.g. "11 owner entries
+        (5 unique people)"). Returns None when the question isn't a plain
+        distinct-value count/list (e.g. it has a filter), so the caller falls
+        back to generated code.
+        """
+        df = self._dataframe
+        if df is None or self._last_interpretation is None:
+            return None
+        if self._last_interpretation.intent not in ("extract", "calculate"):
+            return None
+        # A filtered/threshold question needs real code — don't hijack it.
+        if self._FILTER_CUES.search(question):
+            return None
+        wants_list = bool(self._LIST_CUES.search(question))
+        wants_count = bool(self._COUNT_CUES.search(question))
+        if not (wants_list or wants_count):
+            return None
+        col = self._match_column(question)
+        if col is None:
+            return None
+
+        vals = [str(v).strip() for v in df[col].dropna().tolist()]
+        vals = [v for v in vals if v and v.lower() != "nan"]
+        entries = list(dict.fromkeys(vals))  # order-preserving distinct cells
+        if not entries:
+            return None
+        n = len(entries)
+        label = str(col).strip()
+
+        # The "unique individuals" clarification only makes sense for people
+        # columns — splitting free-text (e.g. a Task sentence with commas)
+        # produces nonsense. So compute it only for owner/assignee-type columns.
+        is_person = any(k in label.lower() for k in
+                        ("owner", "assign", "person", "people", "author", "responsible", "name"))
+
+        indiv, seen, bundled = [], set(), False
+        if is_person:
+            for cell in entries:
+                # Drop parenthetical notes FIRST ("(with Akshat)", "(+Anutosh)")
+                # so the bundle-splitter doesn't tear them into fragments, then
+                # split the remaining bundled names.
+                cleaned = re.sub(r"\([^)]*\)", " ", cell)
+                parts = [p.strip(" .") for p in self._BUNDLE_SPLIT.split(cleaned) if p.strip(" .")]
+                if len(parts) > 1:
+                    bundled = True
+                for p in parts:
+                    if p and p.lower() not in seen:
+                        seen.add(p.lower())
+                        indiv.append(p)
+        clarify = is_person and bundled and len(indiv) != n
+
+        if wants_list:
+            out = [f"There are {n} distinct {label} entries:"]
+            out += [f"- {e}" for e in entries]
+            if clarify:
+                out += ["", f"(These {n} entries cover {len(indiv)} unique people: "
+                            f"{', '.join(indiv)}.)"]
+            text = "\n".join(out)
+        else:  # pure count
+            if clarify:
+                text = (f"There are {n} distinct {label} entries "
+                        f"({len(indiv)} unique people: {', '.join(indiv)}).")
+            else:
+                text = f"There are {n} distinct {label} entries."
+        return self._clean_datetime_strings(text)
+
     def _ask_with_code(self, question: str) -> str:
         """Generate pandas code via LLM, execute it, and return the result."""
         import pandas as pd
@@ -255,7 +409,16 @@ class DocumentChat:
         if result is None:
             raise ValueError("Code did not set `result`")
 
-        if hasattr(result, "to_string"):
+        # Render list-like results (Series/ndarray/list from .unique(), filters,
+        # etc.) as one exact value per line — never collapse via str() into an
+        # ugly array repr. This keeps the executed, verbatim values intact
+        # instead of falling back to the text model, which paraphrases names.
+        if hasattr(result, "tolist"):          # numpy ndarray / pandas Series
+            items = result.tolist()
+            text = "\n".join(f"- {x}" for x in items)
+        elif isinstance(result, (list, tuple, set)):
+            text = "\n".join(f"- {x}" for x in result)
+        elif hasattr(result, "to_string"):     # DataFrame
             text = result.to_string(index=False)
         else:
             text = str(result)
@@ -431,13 +594,17 @@ class DocumentChat:
             content_blocks.append({"type": "text", "text": messages[-1]["content"]})
             messages = messages[:-1] + [{"role": "user", "content": content_blocks}]
 
-        response = self._client.messages.create(
+        # Stream: the SDK rejects non-streaming requests whose max_tokens could
+        # exceed a 10-minute response, which every current model's output
+        # ceiling does.
+        with self._client.messages.stream(
             model=self._model,
             max_tokens=self._output_tokens,
             system=self._build_system_prompt(),
             messages=messages,
-        )
-        return response.content[0].text
+        ) as stream:
+            response = stream.get_final_message()
+        return next(b.text for b in response.content if b.type == "text")
 
     def _ask_openai(self, inject_images: bool = False) -> str:
         """Call OpenAI GPT API."""

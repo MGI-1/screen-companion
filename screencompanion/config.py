@@ -63,7 +63,27 @@ CODE_GEN_SYSTEM_PROMPT = (
     "- `df` and `pd` (pandas) are pre-loaded — do not import anything\n"
     "- Store the final human-readable answer as a string in a variable called `result`\n"
     "- Filter and look up data exactly as asked — never guess or infer category/field values\n"
-    "- If the result is a list or table, format it as a readable string\n"
+    "- To count or list the distinct/unique values of a column, compute them from "
+    "`df[col].dropna().unique()`. Use the EXACT cell values verbatim — never paraphrase, "
+    "reorder, split, or merge them. A cell like 'Aman, Anutosh, Rishabh' is ONE distinct "
+    "value and must be kept whole; 'Sujal' and 'Sujal (with Akshat)' are TWO distinct values\n"
+    "- When a question asks 'how many' AND could be followed by 'list them', derive both the "
+    "count and the list from the SAME `unique()` result so they always agree: the count is "
+    "`len(...)` of exactly the values you would list. Assign the list (one value per line) to "
+    "`result` unless only a number was asked for\n"
+    "- When you report the COUNT of distinct values for a column whose cells may bundle "
+    "several names/items (separated by ',', ' and ', '&', '+'), disambiguate by also noting "
+    "the number of distinct individual names in parentheses — split each cell on those "
+    "separators, strip parenthetical notes like '(with Akshat)', and de-duplicate — e.g. "
+    "`result = 'There are 11 distinct owner entries (5 unique people: Akshat, Aman, Anutosh, "
+    "Rishabh, Sujal).'`. The primary count stays the distinct CELL count so it always matches "
+    "a list of those same cells; NEVER split cells when LISTING the values\n"
+    "- Format `result` with light markdown so it renders cleanly in a narrow "
+    "panel: for a list of items, put each on its own line prefixed with '- ' "
+    "(a bullet); for tabular data with multiple columns, build a markdown "
+    "table with a header row and '|' separators (e.g. '| Task | Owner |'). "
+    "Keep the exact/verbatim values — only add the bullet or table markup "
+    "around them, never reword the content\n"
     "- For datetime values: if the time part is midnight (00:00:00), show only the date (str(val.date())). If the date part is 1900-01-01 or today, show only the time (str(val.time())). Otherwise show both date and time (str(val)). Never show '00:00:00' when the original data only has a date.\n"
     "- Return ONLY the Python code, no explanation or markdown"
 )
@@ -111,13 +131,19 @@ AND include a JSON code block with the calculation. Use the exact function names
 {"action": "calculate", "function": "<function_name>", "args": {"param": "value"}}
 ```
 
-CRITICAL RULE for list questions: Whenever the user asks you to filter, select, rank, \
-or pick the top items from a list (e.g. "items above $X", "top 5 by revenue", "every \
-row where amount < 100"), you MUST emit a JSON calculation block using one of the \
-Comparison & Selection functions and trust the returned `filtered_items` / `top_items` \
-/ `ranked_items` array. Never produce the filtered list yourself from the document — \
-the deterministic tool result will be fed back to you in a follow-up turn so you can \
-write the final answer.
+CRITICAL RULE for NUMERIC list questions: When the user filters, ranks, or picks \
+items by a NUMBER (amount, price, date, count) — e.g. "items above $X", "top 5 by \
+revenue", "every row where amount < 100" — you MUST emit a JSON calculation block \
+using one of the Comparison & Selection functions and trust the returned \
+`filtered_items` / `top_items` / `ranked_items` array. Never produce a numeric \
+filtered list yourself — the deterministic tool result is fed back so you can write \
+the final answer.
+
+The Comparison & Selection functions are NUMBER-ONLY. For TEXT / CATEGORY filters — \
+selecting rows by a name, owner, status, label or any non-numeric field (e.g. "tasks \
+assigned to Akshat", "rows owned by Sujal", "where status is done") — do NOT emit a \
+calculation block (passing text like "Akshat" to a numeric function fails). Instead \
+list the matching rows directly from the document, preserving each row's wording.
 
 Available math functions (all numeric args are strings, e.g. "500000"):
 
@@ -168,7 +194,21 @@ Risk: value_at_risk(portfolio_value, volatility, confidence="0.95", days=1)
 Loans: loan_payment(principal, annual_rate, periods)
 
 Be concise, helpful, and precise. Reference specific parts of the document \
-when answering questions."""
+when answering questions.
+
+FORMAT YOUR ANSWERS FOR A NARROW SIDE PANEL. The reply is rendered with light \
+markdown, so structure every answer instead of writing a wall of text:
+- Open with a one-line summary sentence when the question is broad.
+- Use `## Heading` to separate sections when there is more than one.
+- Use `-` bullets for lists — one item per line, never a run-on paragraph of \
+comma-separated items.
+- Use `1.` numbered lists when order or ranking matters.
+- Use `**Label:** value` lines for key/value facts (e.g. dates, owners, counts).
+- Use a markdown table (pipes) when comparing several items across the same \
+fields (e.g. task, due date, owner).
+- Keep bullets short; put detail on its own sub-bullet rather than a long line.
+- Do NOT wrap prose in code fences — reserve ``` fences for the JSON action \
+blocks described above only."""
 
 # ── LLM provider configs ──────────────────────────────────────────
 # model_specs maps each model to:
@@ -181,48 +221,53 @@ LLM_PROVIDERS = {
     "anthropic": {
         "name": "Anthropic (Claude)",
         "models": [
-            "claude-sonnet-4-20250514",
-            "claude-haiku-4-5-20251001",
-            "claude-opus-4-20250514",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
         ],
-        "default_model": "claude-sonnet-4-20250514",
+        "default_model": "claude-sonnet-5",
         "env_key": "ANTHROPIC_API_KEY",
         "model_specs": {
-            "claude-sonnet-4-20250514":  {"input_tokens": 200_000, "output_tokens": 64_000},
-            "claude-haiku-4-5-20251001": {"input_tokens": 200_000, "output_tokens": 64_000},
-            "claude-opus-4-20250514":    {"input_tokens": 200_000, "output_tokens": 32_000},
+            "claude-opus-4-8":   {"input_tokens": 1_000_000, "output_tokens": 128_000},
+            "claude-opus-4-7":   {"input_tokens": 1_000_000, "output_tokens": 128_000},
+            "claude-sonnet-5":   {"input_tokens": 1_000_000, "output_tokens": 128_000},
+            "claude-sonnet-4-6": {"input_tokens": 1_000_000, "output_tokens": 128_000},
+            "claude-haiku-4-5":  {"input_tokens": 200_000,   "output_tokens": 64_000},
         },
     },
     "openai": {
         "name": "OpenAI (GPT)",
         "models": [
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gpt-4-turbo",
-            "o3-mini",
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
         ],
-        "default_model": "gpt-4o",
+        "default_model": "gpt-5.5",
         "env_key": "OPENAI_API_KEY",
+        # GPT-5.x are reasoning models: over Chat Completions they require
+        # max_completion_tokens instead of max_tokens (same as the old o3-mini),
+        # so each carries "reasoning": True.
         "model_specs": {
-            "gpt-4o":      {"input_tokens": 128_000, "output_tokens": 16_384},
-            "gpt-4o-mini": {"input_tokens": 128_000, "output_tokens": 16_384},
-            "gpt-4-turbo": {"input_tokens": 128_000, "output_tokens": 4_096},
-            "o3-mini":     {"input_tokens": 200_000, "output_tokens": 100_000, "reasoning": True},
+            "gpt-5.5":      {"input_tokens": 1_000_000, "output_tokens": 128_000, "reasoning": True},
+            "gpt-5.5-pro":  {"input_tokens": 1_000_000, "output_tokens": 128_000, "reasoning": True},
+            "gpt-5.4":      {"input_tokens": 400_000,   "output_tokens": 128_000, "reasoning": True},
+            "gpt-5.4-mini": {"input_tokens": 400_000,   "output_tokens": 128_000, "reasoning": True},
+            "gpt-5.4-nano": {"input_tokens": 400_000,   "output_tokens": 128_000, "reasoning": True},
         },
     },
     "google": {
         "name": "Google (Gemini)",
         "models": [
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-1.5-pro",
+            "gemini-2.5-flash",
         ],
-        "default_model": "gemini-2.0-flash",
+        "default_model": "gemini-2.5-flash",
         "env_key": "GOOGLE_API_KEY",
         "model_specs": {
-            "gemini-2.0-flash":      {"input_tokens": 1_048_576, "output_tokens": 8_192},
-            "gemini-2.0-flash-lite": {"input_tokens": 1_048_576, "output_tokens": 8_192},
-            "gemini-1.5-pro":        {"input_tokens": 2_097_152, "output_tokens": 8_192},
+            "gemini-2.5-flash": {"input_tokens": 1_048_576, "output_tokens": 65_536},
         },
     },
 }

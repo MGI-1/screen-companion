@@ -27,6 +27,13 @@ _INTENT_PATTERNS = [
         r"\babove\s+\$?\d", r"\bbelow\s+\$?\d", r"\bgreater than\b",
         r"\bless than\b", r"\bmore than\b", r"\bat least\b", r"\bat most\b",
         r"\bover\s+\$?\d", r"\bunder\s+\$?\d",
+        # Filter-by-value (text/category) phrasings — e.g. "tasks assigned to
+        # Akshat", "rows owned by Sujal", "where status is done". These are
+        # data lookups best answered by generating + running code (code mode
+        # on a spreadsheet), never by the numeric threshold tools.
+        r"\bassigned to\b", r"\bowned by\b", r"\bresponsible for\b",
+        r"\bhandled by\b", r"\bbelongs?\s+to\b", r"\bwhere\b.*\bis\b",
+        r"\bwith\s+status\b", r"\bfor\s+owner\b",
     ]),
     ("calculate", [
         r"\bcalculat(e|ion)\b", r"\bcompute\b", r"\btotal\b", r"\bsum\b",
@@ -43,6 +50,13 @@ _INTENT_PATTERNS = [
         r"\blist (all|every|the)\b", r"\bfind (all|every)\b", r"\bextract\b",
         r"\bshow me (all|every|the)\b", r"\bpull out\b", r"\bget me\b",
         r"\bevery\b.*\b(row|entry|item|record|line)\b",
+        # Broader "list" phrasings so a request and its follow-ups both go to
+        # the deterministic spreadsheet engine — otherwise the count comes from
+        # code (exact) while the list comes from the LLM (drops/merges items),
+        # and the two disagree.
+        r"\blist of\b", r"\bthe list\b", r"\blist them\b", r"\blist out\b",
+        r"\b(give|show|get)\s+me\s+(a\s+|the\s+)?list\b",
+        r"\bnames of\b", r"\bwho (are|is) the\b",
     ]),
     ("compare", [
         r"\bcompare\b", r"\bdifference between\b", r"\bvs\.?\b", r"\bversus\b",
@@ -113,9 +127,12 @@ _INTENT_GUIDANCE = {
         "Pull exact numbers from the document — do not estimate."
     ),
     "filter_rank": (
-        "MUST use a calculate JSON block with rank / filter_by_threshold / "
-        "top_n. Trust the tool's filtered_items / ranked_items / top_items "
-        "array — never hand-curate the list yourself."
+        "For NUMERIC thresholds or ranking (amounts, dates, counts — e.g. "
+        "'above 500', 'top 5 by revenue'), use a calculate JSON block with "
+        "rank / filter_by_threshold / top_n and trust its filtered_items / "
+        "ranked_items / top_items array. For TEXT/CATEGORY filters (by name, "
+        "owner, status, category — e.g. 'assigned to Akshat'), do NOT use the "
+        "numeric tools; list the matching rows directly from the document."
     ),
     "edit": (
         "Respond with an edit JSON block. Preserve surrounding context when "

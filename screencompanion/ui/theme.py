@@ -75,10 +75,13 @@ THEMES = {
 FONT_FAMILY = "Outfit"
 if sys.platform == "win32":
     FONT_FALLBACK = "Segoe UI"
+    MONO_FAMILY = "Consolas"
 elif sys.platform == "darwin":
     FONT_FALLBACK = "SF Pro Display"
+    MONO_FAMILY = "Menlo"
 else:
     FONT_FALLBACK = "Helvetica Neue"
+    MONO_FAMILY = "DejaVu Sans Mono"
 
 FONT_SIZE_SM = 11
 FONT_SIZE = 13
@@ -95,6 +98,11 @@ PANEL_PADDING = 12
 def get_font(size: int = FONT_SIZE, weight: str = FONT_WEIGHT_NORMAL) -> tuple:
     """Return a font tuple, preferring Outfit with fallback."""
     return (FONT_FAMILY, size, weight)
+
+
+def get_mono_font(size: int = FONT_SIZE_SM, weight: str = FONT_WEIGHT_NORMAL) -> tuple:
+    """Return a monospace font tuple, used for aligned tables/columns."""
+    return (MONO_FAMILY, size, weight)
 
 
 def get_colors(mode: str = "dark") -> dict:

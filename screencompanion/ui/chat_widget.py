@@ -1,6 +1,7 @@
 """Chat panel UI — message bubbles, input box, header with status."""
 
 import os
+import re
 import customtkinter as ctk
 from datetime import datetime
 from typing import Callable, Optional
@@ -8,6 +9,7 @@ from typing import Callable, Optional
 from screencompanion.ui.theme import (
     get_colors,
     get_font,
+    get_mono_font,
     CORNER_RADIUS,
     CORNER_RADIUS_SM,
     PANEL_PADDING,
@@ -364,7 +366,12 @@ class ChatWidget(ctk.CTkToplevel):
         self._scroll_to_bottom()
 
     def add_bot_message(self, text: str):
-        """Add a bot message bubble (left-aligned, glass)."""
+        """Add a bot message bubble (left-aligned, glass).
+
+        The reply is rendered as light markdown — headings, bullet/numbered
+        lists, key/value lines and tables — so structured answers read cleanly
+        in the narrow panel instead of appearing as one wall of text.
+        """
         colors = get_colors(self._mode)
         max_bubble_width = WINDOW_WIDTH - 2 * PANEL_PADDING - 20
 
@@ -378,20 +385,163 @@ class ChatWidget(ctk.CTkToplevel):
             border_width=1,
             border_color=colors["border_subtle"],
         )
-        bubble.pack(side="left", anchor="w")
+        bubble.pack(side="left", anchor="w", fill="x", expand=True)
 
-        label = ctk.CTkLabel(
-            bubble,
-            text=text,
-            font=get_font(FONT_SIZE),
-            text_color=colors["bot_bubble_text"],
-            wraplength=max_bubble_width - 20,
-            justify="left",
-            anchor="w",
-        )
-        label.pack(padx=10, pady=6)
+        self._render_markdown(bubble, text, colors, wrap=max_bubble_width - 24)
 
         self._scroll_to_bottom()
+
+    # ── Lightweight markdown rendering ──────────────────────────
+
+    _INLINE_PATTERNS = (
+        (re.compile(r"\*\*(.+?)\*\*"), r"\1"),   # **bold**
+        (re.compile(r"__(.+?)__"), r"\1"),       # __bold__
+        (re.compile(r"`([^`]+?)`"), r"\1"),      # `code`
+        (re.compile(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)"), r"\1"),  # *italic*
+    )
+
+    @classmethod
+    def _strip_inline(cls, text: str) -> str:
+        """Remove inline markdown markers so no stray * / ` / _ symbols show."""
+        for pattern, repl in cls._INLINE_PATTERNS:
+            text = pattern.sub(repl, text)
+        return text.strip()
+
+    def _render_markdown(self, parent, text: str, colors: dict, wrap: int):
+        """Render `text` as a vertical stack of styled blocks inside `parent`."""
+        content = ctk.CTkFrame(parent, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=12, pady=8)
+
+        lines = text.split("\n")
+        i, n = 0, len(lines)
+        while i < n:
+            raw = lines[i].expandtabs(4)
+            stripped = raw.strip()
+            # Leading whitespace → nesting level for list items (2 spaces/level)
+            indent_spaces = len(raw) - len(raw.lstrip(" "))
+            indent_px = min(indent_spaces // 2, 4) * 16
+
+            # Blank line → small vertical gap
+            if not stripped:
+                ctk.CTkFrame(content, fg_color="transparent", height=5).pack(fill="x")
+                i += 1
+                continue
+
+            # Table block: a run of pipe-delimited rows
+            if stripped.startswith("|") and stripped.count("|") >= 2:
+                table_lines = []
+                while i < n and lines[i].strip().startswith("|"):
+                    table_lines.append(lines[i].strip())
+                    i += 1
+                self._render_table(content, table_lines, colors)
+                continue
+
+            # Heading:  #, ##, ### ...
+            m = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+            if m:
+                htext = self._strip_inline(m.group(2))
+                size = FONT_SIZE_LG if len(m.group(1)) <= 2 else FONT_SIZE
+                ctk.CTkLabel(
+                    content, text=htext, font=get_font(size, "bold"),
+                    text_color=colors["accent"], wraplength=wrap,
+                    justify="left", anchor="w",
+                ).pack(fill="x", anchor="w", pady=(4, 2))
+                i += 1
+                continue
+
+            # Bullet:  -, *, •  (nested by leading indent)
+            m = re.match(r"^[-*•]\s+(.*)$", stripped)
+            if m:
+                # A top-level bullet whose whole text is bold acts as a
+                # category label (e.g. "- **Technical:**") — render it bold.
+                marker = "•" if indent_px else "▪"
+                self._render_bullet(content, marker, m.group(1), colors, wrap, indent_px)
+                i += 1
+                continue
+
+            # Numbered list:  1.  2)  ...
+            m = re.match(r"^(\d+)[.)]\s+(.*)$", stripped)
+            if m:
+                self._render_bullet(
+                    content, f"{m.group(1)}.", m.group(2), colors, wrap, indent_px
+                )
+                i += 1
+                continue
+
+            # Whole-line bold (e.g. **Section**) → bold paragraph
+            if re.match(r"^\*\*.+\*\*:?$", stripped):
+                ctk.CTkLabel(
+                    content, text=self._strip_inline(stripped),
+                    font=get_font(FONT_SIZE, "bold"),
+                    text_color=colors["bot_bubble_text"], wraplength=wrap,
+                    justify="left", anchor="w",
+                ).pack(fill="x", anchor="w", pady=(3, 1))
+                i += 1
+                continue
+
+            # Plain paragraph
+            ctk.CTkLabel(
+                content, text=self._strip_inline(stripped),
+                font=get_font(FONT_SIZE),
+                text_color=colors["bot_bubble_text"], wraplength=wrap,
+                justify="left", anchor="w",
+            ).pack(fill="x", anchor="w", pady=1)
+            i += 1
+
+    def _render_bullet(self, parent, marker: str, text: str, colors: dict,
+                       wrap: int, indent_px: int = 0):
+        """Render a bullet/numbered item with a hanging indent.
+
+        A bullet whose entire text is bold (e.g. "- **Category:**") is treated
+        as a section label and rendered bold, so grouped lists keep their
+        header → item hierarchy.
+        """
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", anchor="w", pady=1)
+
+        body = self._strip_inline(text)
+        is_label = bool(re.fullmatch(r"\*\*.+?\*\*:?", text.strip()))
+        weight = "bold" if is_label else "normal"
+
+        ctk.CTkLabel(
+            row, text=marker, font=get_font(FONT_SIZE, "bold"),
+            text_color=colors["accent"], width=18, anchor="nw", justify="left",
+        ).pack(side="left", anchor="n", padx=(indent_px, 0))
+
+        ctk.CTkLabel(
+            row, text=body, font=get_font(FONT_SIZE, weight),
+            text_color=colors["bot_bubble_text"],
+            wraplength=wrap - 22 - indent_px,
+            justify="left", anchor="w",
+        ).pack(side="left", fill="x", expand=True, anchor="w")
+
+    def _render_table(self, parent, table_lines: list, colors: dict):
+        """Render a markdown pipe-table as aligned monospace rows."""
+        rows = []
+        for ln in table_lines:
+            cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+            # Skip the |---|---| separator row
+            if cells and all(re.fullmatch(r":?-{2,}:?", c or "") for c in cells):
+                continue
+            rows.append([self._strip_inline(c) for c in cells])
+        if not rows:
+            return
+
+        ncol = max(len(r) for r in rows)
+        for r in rows:
+            r.extend([""] * (ncol - len(r)))
+        widths = [max(len(r[c]) for r in rows) for c in range(ncol)]
+
+        table_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        table_frame.pack(fill="x", anchor="w", pady=(3, 3))
+        for idx, r in enumerate(rows):
+            line = "   ".join(r[c].ljust(widths[c]) for c in range(ncol))
+            ctk.CTkLabel(
+                table_frame, text=line,
+                font=get_mono_font(FONT_SIZE_SM, "bold" if idx == 0 else "normal"),
+                text_color=(colors["accent"] if idx == 0 else colors["bot_bubble_text"]),
+                justify="left", anchor="w",
+            ).pack(fill="x", anchor="w")
 
     def add_system_message(self, text: str):
         """Add a system notification (centered, muted)."""

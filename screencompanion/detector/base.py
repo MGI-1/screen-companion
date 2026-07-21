@@ -21,6 +21,29 @@ class BaseDetector(ABC):
         """Return (app_name, bundle_id/process_name) of frontmost app, or None."""
         ...
 
+    def is_self_foreground(self) -> bool:
+        """Return True when Screen Companion's own window is in the foreground.
+
+        Used so that clicking into the chat panel to type isn't mistaken for
+        switching away from the document (which would clear it). Overridden
+        per platform; defaults to False.
+        """
+        return False
+
+    def get_any_document_path(self) -> Optional[str]:
+        """Return a document path from ANY open window, not just the foreground.
+
+        The foreground-only ``get_document_path`` is right for the passive poll
+        loop (it tracks what the user is actively looking at). But the manual
+        "detect" button and opening the panel run while the user is interacting
+        with OUR window — so the foreground is Screen Companion itself and a
+        foreground-only scan always finds nothing. This scans every visible
+        window so the document sitting behind the panel is still found.
+
+        Overridden per platform; defaults to the foreground-only result.
+        """
+        return self.get_document_path()
+
 
 class FocusWatcher:
     """Polls for document focus changes in a background thread."""
@@ -61,16 +84,51 @@ class FocusWatcher:
         Unlike the poll loop, always fires on_change when a path is found,
         even if it matches the last seen path — the user clicked detect
         because they want to confirm/refresh what's loaded.
+
+        Scans every window (not just the foreground) because this runs while
+        the user is interacting with our own panel: the document they want is
+        sitting behind it, so a foreground-only check would always miss it.
         """
-        path = self._detector.get_document_path()
+        path = self._detector.get_any_document_path()
         if path:
             self._current_path = path
             self._on_change(path)
         return self._current_path
 
     def _poll_loop(self):
+        # COM automation (Office document detection on Windows) requires COM to
+        # be initialized on the calling thread. This poll loop runs on its own
+        # background thread, so without this every Excel/Word COM call fails
+        # with "CoInitialize has not been called" and detection silently falls
+        # back to less reliable strategies. No-op on non-Windows platforms.
+        _com_ready = False
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+            _com_ready = True
+        except Exception:
+            pass
+
+        try:
+            self._run_poll_loop()
+        finally:
+            if _com_ready:
+                try:
+                    import pythoncom
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
+    def _run_poll_loop(self):
         while self._running:
             try:
+                # Interacting with our own chat window must not be treated as
+                # switching away from the document — otherwise clicking the
+                # input box clears the loaded document before the user can ask.
+                if self._detector.is_self_foreground():
+                    time.sleep(self._interval)
+                    continue
+
                 # Track which process is in the foreground so we know when
                 # the user switches apps.
                 app_info = self._detector.get_frontmost_app()

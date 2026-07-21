@@ -24,6 +24,9 @@ from screencompanion.chat import DocumentChat
 from screencompanion.reader import read_document, read_dataframe, UnsupportedFormatError, FileTooLargeError
 from screencompanion.editor import apply_edits, UnsupportedEditError
 from screencompanion.browser_server import BrowserServer
+from screencompanion.logging_setup import get_logger
+
+_log = get_logger("app")
 
 
 class ScreenCompanionApp:
@@ -328,6 +331,7 @@ class ScreenCompanionApp:
 
     def _clear_document_status(self):
         """Reset the UI to show no document is loaded (called on main thread)."""
+        _log.info("_clear_document_status: clearing loaded document")
         self._chat.set_document("", "")
         self._chat_widget.set_document_status("No document detected", editable=False)
         self._toggle.set_doc_detected(False)
@@ -365,22 +369,35 @@ class ScreenCompanionApp:
         """Read and load document content (called on main thread)."""
         ext = Path(path).suffix.lower()
         editable = ext in SUPPORTED_EDIT_FORMATS
-        self._chat_widget.set_document_status(filename, editable=editable)
-        self._toggle.set_doc_detected(True)
 
+        # Read the file BEFORE touching the chat or the visible status. Reading
+        # (esp. an XLSX DataFrame) takes time; if we flipped the status bar to
+        # the new document first, there would be a window where the status
+        # shows the new file while the chat still holds the old one — a question
+        # asked then would be answered against the wrong document (e.g. "Word
+        # detected but Excel answer").
         try:
             result = read_document(path, max_chars=self._max_chars_for_active_model())
             df = read_dataframe(path)
-            self._chat.set_document(path, result.text, result.images, dataframe=df)
-            img_note = f", {len(result.images)} image(s)" if result.images else ""
-            df_note = f", {len(df):,} rows (code mode)" if df is not None else ""
-            self._chat_widget.add_system_message(
-                f"Loaded: {filename} ({len(result.text):,} chars{img_note}{df_note})"
-            )
         except (UnsupportedFormatError, FileTooLargeError, FileNotFoundError) as e:
             self._chat_widget.add_system_message(str(e))
+            return
         except Exception as e:
             self._chat_widget.add_system_message(f"Error reading file: {e}")
+            return
+
+        # Chat state first, then announce the document — so the status bar and
+        # the "Loaded" line never appear ahead of the chat actually holding it.
+        self._chat.set_document(path, result.text, result.images, dataframe=df)
+        _log.info("_process_document: loaded path=%r df_present=%s chars=%d",
+                  path, df is not None, len(result.text))
+        self._chat_widget.set_document_status(filename, editable=editable)
+        self._toggle.set_doc_detected(True)
+        img_note = f", {len(result.images)} image(s)" if result.images else ""
+        df_note = f", {len(df):,} rows (code mode)" if df is not None else ""
+        self._chat_widget.add_system_message(
+            f"Loaded: {filename} ({len(result.text):,} chars{img_note}{df_note})"
+        )
 
     def _reload_active_document(self):
         """Re-read the currently loaded document with the active model's char cap.
@@ -423,17 +440,33 @@ class ScreenCompanionApp:
         self._chat_widget.show_typing_indicator()
         self._chat_widget.set_input_enabled(False)
 
+        # Capture which document this question is being asked about. If the
+        # detector swaps the document while the answer is in flight (the user
+        # switches apps mid-request), the answer belongs to the old document —
+        # we discard it in _handle_response rather than show, say, an Excel
+        # answer under a newly-detected Word file.
+        asked_path = self._chat.document_path
+
         # Run LLM call in background thread
         def _ask():
             response = self._chat.ask(text)
-            self._root.after(0, lambda: self._handle_response(response))
+            self._root.after(0, lambda: self._handle_response(response, asked_path))
 
         threading.Thread(target=_ask, daemon=True).start()
 
-    def _handle_response(self, response: str):
+    def _handle_response(self, response: str, asked_path: Optional[str] = None):
         """Process LLM response (called on main thread)."""
         self._chat_widget.hide_typing_indicator()
         self._chat_widget.set_input_enabled(True)
+
+        # Guard against a document switch mid-request: if the loaded document
+        # changed since the question was asked, the answer is about the old
+        # file. Discard it instead of showing it under the new document.
+        if asked_path is not None and asked_path != self._chat.document_path:
+            self._chat_widget.add_system_message(
+                "The document changed while I was answering — please ask again."
+            )
+            return
 
         # Show what the interpreter understood so the user can catch
         # misreads early. Consumed (one-shot) so it never re-renders.
@@ -568,16 +601,19 @@ class ScreenCompanionApp:
         self._show_settings_dialog()
 
     def _show_first_launch(self):
-        """Show welcome + settings on first launch."""
-        x, y = self._toggle.get_position()
-        self._chat_widget.show(x, y)
-        self._chat_widget.add_system_message(
-            "Welcome to Screen Companion! Configure your LLM provider to get started."
-        )
-        self._show_settings_dialog()
+        """Show only the settings dialog on first launch.
 
-    def _show_settings_dialog(self):
-        """Show settings dialog for LLM provider configuration."""
+        The chat panel stays hidden until the user saves valid credentials;
+        _save() opens it once configuration succeeds.
+        """
+        self._show_settings_dialog(first_launch=True)
+
+    def _show_settings_dialog(self, first_launch: bool = False):
+        """Show settings dialog for LLM provider configuration.
+
+        When ``first_launch`` is True the chat panel is not yet visible; a
+        successful Save will open it (see ``_save``).
+        """
         colors = get_colors(self._mode)
 
         dialog = ctk.CTkToplevel(self._root)
@@ -806,10 +842,20 @@ class ScreenCompanionApp:
             # Re-read the active document with the new model's char cap so a
             # switch to a larger-window model actually expands available context.
             self._reload_active_document()
+            dialog.destroy()
+
+            # On first launch the chat panel was kept hidden until the user
+            # configured a provider. Now that Save succeeded, open it.
+            if first_launch and not self._chat_widget.is_visible():
+                x, y = self._toggle.get_position()
+                self._chat_widget.show(x, y)
+                self._chat_widget.add_system_message(
+                    "Welcome to Screen Companion! You're all set."
+                )
+
             self._chat_widget.add_system_message(
                 f"Configured: {name} / {model}{validator_info}"
             )
-            dialog.destroy()
 
         ctk.CTkButton(
             frame,
@@ -836,6 +882,8 @@ class ScreenCompanionApp:
 
 def main():
     """Entry point."""
+    from screencompanion.logging_setup import setup_logging
+    setup_logging()
     app = ScreenCompanionApp()
     app.run()
 
